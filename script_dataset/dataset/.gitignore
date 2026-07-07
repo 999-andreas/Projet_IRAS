@@ -1,5 +1,0 @@
-# Ignore all dataset files by default
-*
-
-# But keep this .gitignore itself
-!.gitignore

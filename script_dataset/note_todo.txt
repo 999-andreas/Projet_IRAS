@@ -1,3 +1,0 @@
-j'aimerais qu'il n'y ai pas d'incrément statique dans le scan, il faudrait un moyen de scruter plus efficacement
-un moyen d'avoir une seule capture pour les signaux large
-je ne sais pas encore se que ça donne pour les signaux non continue 
