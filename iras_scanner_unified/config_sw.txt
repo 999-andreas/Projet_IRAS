@@ -6,8 +6,8 @@ Configuration et constantes par défaut pour IRAS Scanner.
 #  FRÉQUENCES ET DÉBIT
 # ─────────────────────────────────────────────
 
-DEFAULT_FREQ_START      = 11.7e6      # 17.5 MHz
-DEFAULT_FREQ_END        = 12.7e6     # Hz
+DEFAULT_FREQ_START      = 16.2e6      # 17.5 MHz
+DEFAULT_FREQ_END        = 17.2e6     # Hz
 DEFAULT_FREQ_STEP       = 200_000 # Hz
 DEFAULT_SAMPLE_RATE     = 1_200_000 # Hz peut être mettre  1.2GHz c'est suffisant 
 
@@ -16,7 +16,7 @@ DEFAULT_SAMPLE_RATE     = 1_200_000 # Hz peut être mettre  1.2GHz c'est suffisa
 #  PARAMÈTRES DE GAIN ET CORRECTION
 # ─────────────────────────────────────────────
 
-DEFAULT_GAIN            = 20        # dB (0 = AGC automatique)
+DEFAULT_GAIN            = 12       # dB (0 = AGC automatique)
 DEFAULT_PPM             = 0         # ppm - correction cristal oscillateur
 
 
@@ -24,7 +24,7 @@ DEFAULT_PPM             = 0         # ppm - correction cristal oscillateur
 #  DÉTECTION ET ENREGISTREMENT
 # ─────────────────────────────────────────────
 
-DEFAULT_SNR_THRESHOLD   = 15        # dB au dessus du plancher de bruit
+DEFAULT_SNR_THRESHOLD   = 10        # dB au dessus du plancher de bruit
 DEFAULT_RECORD_SECS     = 3         # secondes d'enregistrement IQ
 DEFAULT_OUTPUT_DIR      = "./dataset"
 

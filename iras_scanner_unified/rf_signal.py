@@ -4,12 +4,84 @@ Traitement du signal : FFT, PSD, détection de pics, SNR, etc.
 
 import numpy as np
 from scipy.ndimage import label as ndimage_label
+from scipy.signal import iirfilter, lfilter
 from config import (
     DEFAULT_FFT_SIZE, DEFAULT_N_AVG, DEFAULT_DC_WIDTH_BINS, DEFAULT_SNR_THRESHOLD,
     SATURATION_THRESHOLD_DB, DEFAULT_BW_THRESHOLD_DB
 )
 
+'''pas utilisé finalement, potienellement utile pour le numérique
+def estimate_accurate_bw_over_time(iq, sample_rate, fft_size=512, overlap=256):
+    """
+    Calcule la bande passante en suivant son évolution bloc par bloc dans le temps,
+    puis extrait une valeur moyenne robuste en éliminant les silences.
+    """
+    step = fft_size - overlap
+    window = np.blackman(fft_size)
+    
+    instantaneous_bws = []
+    center_bin = fft_size // 2
+    search_width = max(5, int(fft_size * 0.05)) # ±5% autour du centre
+    
+    # Parcours de l'enregistrement dans le temps
+    for start in range(0, len(iq) - fft_size, step):
+        frame = iq[start : start + fft_size]
+        
+        # FFT du bloc temporel courant
+        fft_out = np.fft.fftshift(np.fft.fft(frame * window, fft_size))
+        psd_block = 10 * np.log10(np.abs(fft_out) ** 2 + 1e-20)
+        
+        # On cherche le pic central de CE bloc précisément
+        zone_centrale = psd_block[center_bin - search_width : center_bin + search_width]
+        peak_bin = int(np.argmax(zone_centrale) + (center_bin - search_width))
+        
+        # On mesure la BW de ce bloc via le moteur robuste
+        bw_hz, _, _ = compute_robust_bandwidth(
+            psd=psd_block,
+            peak_bin=peak_bin,
+            sample_rate=sample_rate,
+            fft_size=fft_size,
+            threshold_db=DEFAULT_BW_THRESHOLD_DB,
+            reference_is_floor=False
+        )
+        
+        # On n'enregistre la BW que si le bloc contient vraiment du signal
+        # (on évite de mesurer le bruit pendant les silences des bursts)
+        floor = np.percentile(psd_block, 10)
+        if psd_block[peak_bin] > (floor + 8): # Le pic doit dépasser le bruit du bloc
+            instantaneous_bws.append(bw_hz)
+            
+    if not instantaneous_bws:
+        return sample_rate * 0.1 # Valeur de secours si tout est vide
+        
+    # --- Agrégation robuste ---
+    # Au lieu d'une moyenne pure qui peut être tirée vers le bas par des blocs de transition,
+    # on utilise le 75ème ou 90ème percentile. Ça donne la largeur "maximale" occupée 
+    # par le signal lorsqu'il est pleinement actif.
+    accurate_bw_hz = np.percentile(instantaneous_bws, 75)
+    
+    return float(accurate_bw_hz)
+'''
+    
 
+def isolate_central_signal(iq, current_sr, target_bw):
+    """
+    Filtre le signal IQ pour ne garder que la bande utile centrale.
+    (Conservé ici au cas où d'autres modules y font référence).
+    """
+    decim_factor = int(current_sr / (target_bw * 1.5))
+    if decim_factor <= 1:
+        return iq, current_sr
+    
+    nyquist = current_sr / 2
+    cutoff = (target_bw * 1.2) / 2
+    b, a = iirfilter(4, cutoff / nyquist, btype='lowpass', ftype='butter')
+    
+    iq_filtered = lfilter(b, a, iq)
+    iq_zoomed = iq_filtered[::decim_factor]
+    new_sr = current_sr / decim_factor
+    
+    return iq_zoomed, new_sr
 # ─────────────────────────────────────────────
 #  [1] FFT MOYENNÉE (Welch simplifié, 50 % overlap); 
 # ─────────────────────────────────────────────

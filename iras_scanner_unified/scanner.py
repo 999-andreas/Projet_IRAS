@@ -11,10 +11,10 @@ from config import (
     DEFAULT_FFT_SIZE, DEFAULT_N_AVG, SETTLE_SKIP_SAMPLES,
 )
 from sdr import UsbSdrClient, RtlTcpClient
-from signal import (
+from rf_signal import (
     compute_averaged_psd, mask_dc_spike, noise_floor, peak_power,
     check_saturation, is_duplicate_signal,
-    detect_all_signals
+    detect_all_signals, isolate_central_signal
 )
 from recording import IQProducer, record_iq, save_sample
 from visualization import save_debug_plot
@@ -158,19 +158,24 @@ def scan(args, mode):
                     print(f"           ↳ DOUBLON {exact_freq/1e6:.4f} MHz — ignoré")
                     continue
 
-                # Sample rate adapté à la BW du signal.
-                # 256 kHz suffit dans l'immense majorité des cas. On ne
-                # monte à 900 kHz (le prochain palier valide côté
-                # librtlsdr — le gap 300k-900k est rejeté par le driver,
-                # ce n'est pas une simple zone à éviter par prudence)
-                # que si la BW l'exige vraiment : ratio target_sr/256k >= 2.
-                target_sr = bw_hz * 2.5
-                if target_sr / 256_000 >= 2:
-                    record_sr = 900_010
+                # Si le signal est étroit, on serre le filtre pour chasser les voisins.
+                if bw_hz > 100_000:
+                    decim_bw = max(bw_hz * 1.2, 150_000)  # Marge de sécurité pour la déviation FM
                 else:
-                    record_sr = 256_000
-                record_sr = min(record_sr, args.sample_rate)
+                    decim_bw = max(bw_hz * 1.3, 12_000)   # Filtre minime (minimum 12 kHz)
 
+                # Le théorème de Nyquist-Shannon + du rab un ratio d'environ 2.5x.
+                target_sr = decim_bw * 2.5
+                
+                # Le driver RTL-SDR rejette les valeurs entre 300 kHz et 900 kHz.
+                # On choisit donc le palier de 256 kHz si ça passe, sinon on saute direct à 900 kHz.
+                if target_sr <= 256_000:
+                    record_sr = 256_000
+                else:
+                    record_sr = 900_010
+                
+                # Sécurité : On ne dépasse jamais le sample rate maximum demandé par l'utilisateur
+                record_sr = min(record_sr, args.sample_rate)
                 print(f"           ↳ ENREGISTREMENT {exact_freq/1e6:.4f} MHz  "
                       f"SNR={snr_val:>+5.1f} dB  BW≈{bw_hz/1e3:.0f} kHz  "
                       f"SR={record_sr/1e3:.0f} kHz ...", end="", flush=True)
@@ -181,9 +186,10 @@ def scan(args, mode):
                 sdr.sample_rate = record_sr
 
                 iq        = record_iq(sdr, args.record_secs, record_sr)
-                path      = save_sample(iq, exact_freq, snr_val, record_sr, run_dir, bw_hz)
+                iq_clean, sample_rate_clean = isolate_central_signal(iq, record_sr, decim_bw) #on isole le signal central pour éviter les voisins
+                path      = save_sample(iq_clean, exact_freq, snr_val, sample_rate_clean, run_dir, bw_hz)
                 base_name = os.path.basename(path).replace(".wav", "")
-                path_png  = save_debug_plot(iq, exact_freq, record_sr, run_dir,
+                path_png  = save_debug_plot(iq_clean, exact_freq, sample_rate_clean, run_dir,
                                             base_name, args.snr_threshold)
 
                 # Restaurer le SR de scan
