@@ -7,14 +7,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import iirfilter, lfilter
 from scipy.signal import welch
-from rf_signal import compute_robust_bandwidth
+from rf_signal import compute_robust_bandwidth, noise_floor, cfar_threshold_offset_db, local_noise_estimates_db
 from config import DEFAULT_BW_THRESHOLD_DB
 
 
 def save_debug_plot(iq, freq_hz, sample_rate, output_dir, base_name, snr_threshold):
     """
-    Génère un graphique de diagnostic multi-panels.
-    Prend en entrée un signal IQ DÉJÀ centré et filtré (zoomé numérique effectué en amont).
+    Génère un graphique de diagnostic multi-panels pour UN signal déjà isolé
+    (IQ centré + filtré autour de sa bande, zoomé numériquement en amont).
+
+    Ce plot sert à l'analyse fine du signal (spectre zoomé, waterfall,
+    constellation, déviation FSK, enveloppe temporelle). Il ne reflète PAS
+    la décision de détection (autre spectre, autre FFT, autre sample rate
+    que celui utilisé pendant le scan) — voir save_hop_plot() pour ça.
     """
     plt.figure(figsize=(15, 12))
     plt.suptitle(f"Analyse du Signal : {freq_hz/1e6:.3f} MHz", fontsize=16)
@@ -60,10 +65,10 @@ def save_debug_plot(iq, freq_hz, sample_rate, output_dir, base_name, snr_thresho
     plt.plot(f, psd_db, color='cyan', linewidth=0.8)
     plt.fill_between(f, psd_db, -140, color='cyan', alpha=0.2)
 
-    # Lignes de repère
+    # Lignes de repère (purement descriptives : PAS le seuil de détection réel,
+    # qui a été appliqué plus tôt sur un autre spectre — voir save_hop_plot())
     floor = np.percentile(psd_db, 10)
-    plt.axhline(floor, color='yellow', linestyle=':', label='Noise floor')
-    plt.axhline(floor + snr_threshold, color='red', linestyle='--', label='Seuil Détection')
+    plt.axhline(floor, color='yellow', linestyle=':', label='Noise floor (local)')
     plt.axvline(peak_freq_mhz, color='red', linestyle='-', linewidth=0.5, label='Pic Signal')
 
     # Dessin du rectangle de la bande passante
@@ -123,6 +128,85 @@ def save_debug_plot(iq, freq_hz, sample_rate, output_dir, base_name, snr_thresho
     os.makedirs(output_dir, exist_ok=True)
     plot_path = os.path.join(output_dir, base_name + ".png")
     plt.savefig(plot_path, facecolor='#2e2e2e')
+    plt.close()
+
+    return plot_path
+
+
+# ─────────────────────────────────────────────
+#  PLOT PAR HOP : montre réellement comment la
+#  détection a décidé, sur le spectre du hop tel
+#  que vu pendant le scan (même FFT, même seuil).
+# ─────────────────────────────────────────────
+
+def save_hop_plot(psd, center_freq_hz, sample_rate, signals, output_dir, hop_index,
+                   fft_size, detector, snr_threshold,
+                   cfar_guard_cells=None, cfar_train_cells=None, cfar_pfa=None):
+    """
+    psd            : PSD du hop (dB), issu de compute_averaged_psd(), même
+                     tableau que celui passé au détecteur — donc le seuil
+                     tracé ici est exactement celui qui a servi à décider.
+    center_freq_hz : fréquence centrale du hop (Hz).
+    sample_rate    : sample rate utilisé pour ce hop (Hz).
+    signals        : liste de dicts retournée par detect_all_signals[_cfar]
+                     (mêmes clés : freq_hz, snr_db, peak_db, bw_hz, ...).
+    hop_index      : numéro du hop (pour le nom de fichier).
+    detector       : "threshold" ou "cfar".
+    cfar_*         : paramètres CFAR utilisés pour CE hop (requis si
+                     detector == "cfar", ignorés sinon).
+    """
+    
+    freqs_mhz = (center_freq_hz + np.fft.fftshift(
+        np.fft.fftfreq(fft_size, d=1.0 / sample_rate)
+    )) / 1e6
+
+    floor = noise_floor(psd)
+
+    plt.figure(figsize=(13, 6))
+    plt.plot(freqs_mhz, psd, color='cyan', linewidth=0.8, label='PSD (hop)')
+    plt.fill_between(freqs_mhz, psd, -140, color='cyan', alpha=0.15)
+    plt.axhline(floor, color='yellow', linestyle=':', linewidth=1.0, label='Noise floor (global)')
+
+    if detector == "cfar":
+        psd_linear = np.power(10.0, psd / 10.0)
+        noise_local_linear = local_noise_estimates_db(psd_linear, cfar_guard_cells, cfar_train_cells)
+        noise_local_db = 10.0 * np.log10(noise_local_linear + 1e-20)
+        offset_db = cfar_threshold_offset_db(cfar_train_cells, cfar_pfa)
+        threshold_curve_db = noise_local_db + offset_db
+
+        plt.plot(freqs_mhz, threshold_curve_db, color='red', linestyle='--', linewidth=1.2,
+                  label=f'Seuil SO-CFAR (guard={cfar_guard_cells}, train={cfar_train_cells}, Pfa={cfar_pfa:g})')
+    else:
+        plt.axhline(floor + snr_threshold, color='red', linestyle='--', linewidth=1.2,
+                    label=f'Seuil fixe (floor +{snr_threshold} dB)')
+
+    # Marquer chaque signal retenu par le détecteur
+    for k, sig in enumerate(signals):
+        f_mhz = sig['freq_hz'] / 1e6
+        plt.axvline(f_mhz, color='lime', linestyle='-', linewidth=1.0, alpha=0.8)
+        plt.axvspan(sig['freq_lo'] / 1e6, sig['freq_hi'] / 1e6, color='lime', alpha=0.10)
+        plt.annotate(
+            f"#{k+1}\n{f_mhz:.4f} MHz\nSNR {sig['snr_db']:+.1f} dB\nBW {sig['bw_hz']/1e3:.0f} kHz",
+            xy=(f_mhz, sig['peak_db']),
+            xytext=(0, 10), textcoords='offset points',
+            ha='center', fontsize=7, color='white',
+            bbox=dict(facecolor='black', alpha=0.6, edgecolor='lime', boxstyle='round,pad=0.2')
+        )
+
+    detector_label = "SO-CFAR" if detector == "cfar" else "Seuil fixe"
+    plt.title(f"Hop #{hop_index}  —  {center_freq_hz/1e6:.3f} MHz  "
+              f"({detector_label}, {len(signals)} signal(aux) détecté(s))")
+    plt.xlabel("Fréquence (MHz)")
+    plt.ylabel("Puissance (dBFS)")
+    plt.ylim(floor - 5, max(np.max(psd), floor + snr_threshold) + 8)
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc='upper right', fontsize=8)
+    plt.tight_layout()
+
+    os.makedirs(output_dir, exist_ok=True)
+    base_name = f"hop_{hop_index:04d}_{center_freq_hz/1e6:.3f}MHz"
+    plot_path = os.path.join(output_dir, base_name + ".png")
+    plt.savefig(plot_path, facecolor='#2e2e2e', dpi=110)
     plt.close()
 
     return plot_path

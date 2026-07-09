@@ -8,7 +8,8 @@ from config import (
     DEFAULT_SAMPLE_RATE, DEFAULT_GAIN, DEFAULT_PPM,
     DEFAULT_SNR_THRESHOLD, DEFAULT_RECORD_SECS, DEFAULT_OUTPUT_DIR,
     DEFAULT_N_AVG, DEFAULT_DUPLICATE_HZ,
-    DEFAULT_RTL_TCP_HOST, DEFAULT_RTL_TCP_PORT, DEFAULT_TCP_TIMEOUT
+    DEFAULT_RTL_TCP_HOST, DEFAULT_RTL_TCP_PORT, DEFAULT_TCP_TIMEOUT,
+    DEFAULT_DETECTOR
 )
 
 
@@ -76,6 +77,12 @@ def build_argument_parser():
                           help=f"Durée d'enregistrement en secondes (défaut: {DEFAULT_RECORD_SECS}s)")
     detection.add_argument("--min-separation-hz",  type=float, default=DEFAULT_DUPLICATE_HZ,
                           help=f"Seuil anti-duplication en Hz (défaut: {DEFAULT_DUPLICATE_HZ}Hz)")
+    detection.add_argument("--detector",           type=str,   default=DEFAULT_DETECTOR,
+                          choices=["threshold", "cfar"],
+                          help=f"Méthode de détection des signaux : 'threshold' (seuil fixe "
+                               f"vs plancher de bruit global) ou 'cfar' (SO-CFAR, seuil adaptatif "
+                               f"local, meilleur pour signaux proches / bande non homogène) "
+                               f"(défaut: {DEFAULT_DETECTOR})")
 
     # ── FFT et traitement ─────────────────────
     processing = parser.add_argument_group("Traitement du signal")

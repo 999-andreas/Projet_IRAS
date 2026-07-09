@@ -6,17 +6,17 @@ Configuration et constantes par défaut pour IRAS Scanner.
 #  FRÉQUENCES ET DÉBIT
 # ─────────────────────────────────────────────
 
-DEFAULT_FREQ_START      = 88e6      # 17.5 MHz
-DEFAULT_FREQ_END        = 108e6     # Hz
-DEFAULT_FREQ_STEP       = 2_000_000 # Hz
-DEFAULT_SAMPLE_RATE     = 1_400_000 # Hz peut être mettre  1.2GHz c'est suffisant 
+DEFAULT_FREQ_START      = 428e6      # 17.5 MHz
+DEFAULT_FREQ_END        = 429e6     # Hz
+DEFAULT_FREQ_STEP       = 200_000 # Hz
+DEFAULT_SAMPLE_RATE     = 1_200_000 # Hz peut être mettre  1.2GHz c'est suffisant 
 
 
 # ─────────────────────────────────────────────
 #  PARAMÈTRES DE GAIN ET CORRECTION
 # ─────────────────────────────────────────────
 
-DEFAULT_GAIN            = 20        # dB (0 = AGC automatique)
+DEFAULT_GAIN            = 20       # dB (0 = AGC automatique)
 DEFAULT_PPM             = 0         # ppm - correction cristal oscillateur
 
 
@@ -24,7 +24,7 @@ DEFAULT_PPM             = 0         # ppm - correction cristal oscillateur
 #  DÉTECTION ET ENREGISTREMENT
 # ─────────────────────────────────────────────
 
-DEFAULT_SNR_THRESHOLD   = 20        # dB au dessus du plancher de bruit
+DEFAULT_SNR_THRESHOLD   = 10        # dB au dessus du plancher de bruit
 DEFAULT_RECORD_SECS     = 3         # secondes d'enregistrement IQ
 DEFAULT_OUTPUT_DIR      = "./dataset"
 
@@ -34,13 +34,21 @@ DEFAULT_OUTPUT_DIR      = "./dataset"
 # ─────────────────────────────────────────────
 
 DEFAULT_FFT_SIZE        = 2048      # taille de la FFT (doit être une puissance de 2)
-DEFAULT_N_AVG           = 64        # nombre de frames à moyenner 
-DEFAULT_DUPLICATE_HZ    = 200_000    # Hz - seuil anti-duplication
+DEFAULT_N_AVG           = 64        # nombre de frames à moyenner
+DEFAULT_DUPLICATE_HZ    = 10_000    # Hz - seuil anti-duplication
 DEFAULT_DC_WIDTH_BINS   = None      # None = auto (1 % des bins
-DEFAULT_BW_THRESHOLD_DB = 5        # Seuil de détection de la bande passante
-SETTLE_SKIP_SAMPLES     = 0         # samples jetés après retune (utile si avait pas des sleep dans le code)
-SATURATION_THRESHOLD_DB = -3.0      # niveau max avant avertissement (purement informatif)
+DEFAULT_BW_THRESHOLD_DB = 10        # Seuil unique et partagé pour la mesure de BW)
+SETTLE_SKIP_SAMPLES     = 0         # samples jetés après retune
+SATURATION_THRESHOLD_DB = -3.0      # niveau max avant avertissement
 
+# ─────────────────────────────────────────────
+#  DÉTECTION CFAR (SO-CFAR : Smallest-Of)
+# ─────────────────────────────────────────────
+
+DEFAULT_DETECTOR          = "threshold"  # "threshold" (méthode historique) ou "cfar"
+DEFAULT_CFAR_GUARD_CELLS  = 25    # cellules de garde de chaque côté du bin testé
+DEFAULT_CFAR_TRAIN_CELLS  = 20    # cellules d'entraînement de chaque côté (fenêtre de bruit)
+DEFAULT_CFAR_PFA          = 1e-3  # probabilité de fausse alarme cible (plus petit = plus strict) 
 
 # ─────────────────────────────────────────────
 #  RTL-TCP (réseau)

@@ -7,61 +7,9 @@ from scipy.ndimage import label as ndimage_label
 from scipy.signal import iirfilter, lfilter
 from config import (
     DEFAULT_FFT_SIZE, DEFAULT_N_AVG, DEFAULT_DC_WIDTH_BINS, DEFAULT_SNR_THRESHOLD,
-    SATURATION_THRESHOLD_DB, DEFAULT_BW_THRESHOLD_DB
+    SATURATION_THRESHOLD_DB, DEFAULT_BW_THRESHOLD_DB,
+    DEFAULT_CFAR_GUARD_CELLS, DEFAULT_CFAR_TRAIN_CELLS, DEFAULT_CFAR_PFA
 )
-
-'''pas utilisé finalement, potienellement utile pour le numérique
-def estimate_accurate_bw_over_time(iq, sample_rate, fft_size=512, overlap=256):
-    """
-    Calcule la bande passante en suivant son évolution bloc par bloc dans le temps,
-    puis extrait une valeur moyenne robuste en éliminant les silences.
-    """
-    step = fft_size - overlap
-    window = np.blackman(fft_size)
-    
-    instantaneous_bws = []
-    center_bin = fft_size // 2
-    search_width = max(5, int(fft_size * 0.05)) # ±5% autour du centre
-    
-    # Parcours de l'enregistrement dans le temps
-    for start in range(0, len(iq) - fft_size, step):
-        frame = iq[start : start + fft_size]
-        
-        # FFT du bloc temporel courant
-        fft_out = np.fft.fftshift(np.fft.fft(frame * window, fft_size))
-        psd_block = 10 * np.log10(np.abs(fft_out) ** 2 + 1e-20)
-        
-        # On cherche le pic central de CE bloc précisément
-        zone_centrale = psd_block[center_bin - search_width : center_bin + search_width]
-        peak_bin = int(np.argmax(zone_centrale) + (center_bin - search_width))
-        
-        # On mesure la BW de ce bloc via le moteur robuste
-        bw_hz, _, _ = compute_robust_bandwidth(
-            psd=psd_block,
-            peak_bin=peak_bin,
-            sample_rate=sample_rate,
-            fft_size=fft_size,
-            threshold_db=DEFAULT_BW_THRESHOLD_DB,
-            reference_is_floor=False
-        )
-        
-        # On n'enregistre la BW que si le bloc contient vraiment du signal
-        # (on évite de mesurer le bruit pendant les silences des bursts)
-        floor = np.percentile(psd_block, 10)
-        if psd_block[peak_bin] > (floor + 8): # Le pic doit dépasser le bruit du bloc
-            instantaneous_bws.append(bw_hz)
-            
-    if not instantaneous_bws:
-        return sample_rate * 0.1 # Valeur de secours si tout est vide
-        
-    # --- Agrégation robuste ---
-    # Au lieu d'une moyenne pure qui peut être tirée vers le bas par des blocs de transition,
-    # on utilise le 75ème ou 90ème percentile. Ça donne la largeur "maximale" occupée 
-    # par le signal lorsqu'il est pleinement actif.
-    accurate_bw_hz = np.percentile(instantaneous_bws, 75)
-    
-    return float(accurate_bw_hz)
-'''
     
 
 def isolate_central_signal(iq, current_sr, target_bw):
@@ -315,59 +263,6 @@ def compute_robust_bandwidth(psd, peak_bin, sample_rate, fft_size=DEFAULT_FFT_SI
 
     return float(bw_hz), float(freq_lo_rel), float(freq_hi_rel)
 
-'''
-def occupied_bandwidth(psd, center_freq_hz, sample_rate,
-                       fft_size=DEFAULT_FFT_SIZE, threshold_db=10,
-                       min_bw_hz=50_000, max_bw_hz=500_000):
-    """
-    Estime la largeur de bande occupée autour du pic (méthode -N dB).
-
-    Retourne (bw_hz, freq_lo_hz, freq_hi_hz) :
-      - bw_hz     : largeur totale en Hz
-      - freq_lo   : bord bas en Hz
-      - freq_hi   : bord haut en Hz
-
-    On part du bin du pic et on s'étale des deux côtés jusqu'à tomber
-    sous (peak - threshold_db), puis on applique des bornes min/max
-    pour éviter les enregistrements trop étroits ou trop larges.
-    """
-    freqs    = center_freq_hz + np.fft.fftshift(
-        np.fft.fftfreq(fft_size, d=1.0 / sample_rate)
-    )
-    peak_bin = int(np.argmax(psd))
-    peak_val = psd[peak_bin]
-    cutoff   = peak_val - threshold_db
-
-    # Chercher le bord bas
-    lo = peak_bin
-    while lo > 0 and psd[lo] >= cutoff:
-        lo -= 1
-
-    # Chercher le bord haut
-    hi = peak_bin
-    while hi < fft_size - 1 and psd[hi] >= cutoff:
-        hi += 1
-
-    freq_lo = float(freqs[lo])
-    freq_hi = float(freqs[hi])
-    bw_hz   = freq_hi - freq_lo
-
-    # Appliquer les bornes min/max
-    if bw_hz < min_bw_hz:
-        half = min_bw_hz / 2
-        mid  = (freq_lo + freq_hi) / 2
-        freq_lo, freq_hi = mid - half, mid + half
-        bw_hz = min_bw_hz
-
-    if bw_hz > max_bw_hz:
-        half = max_bw_hz / 2
-        mid  = (freq_lo + freq_hi) / 2
-        freq_lo, freq_hi = mid - half, mid + half
-        bw_hz = max_bw_hz
-
-    return float(bw_hz), float(freq_lo), float(freq_hi)
-'''
-
 # ─────────────────────────────────────────────
 #  DÉTECTION MULTI-SIGNAUX PAR HOP
 # ─────────────────────────────────────────────
@@ -375,12 +270,18 @@ def occupied_bandwidth(psd, center_freq_hz, sample_rate,
 def detect_all_signals(psd, center_freq_hz, sample_rate,
                        fft_size=DEFAULT_FFT_SIZE,
                        snr_threshold_db=DEFAULT_SNR_THRESHOLD,
-                       min_bins=5,
-                       above_db=6,
                        min_bw_hz=100,
                        max_bw_hz=500_000):
     """
     Détecte TOUS les signaux au-dessus du seuil SNR dans un PSD.
+
+    La détection des régions candidates se fait directement au seuil
+    (floor + snr_threshold_db) — c'est exactement la ligne rouge tracée
+    par save_hop_plot(), donc tout ce qui dépasse visuellement le seuil
+    sur le graphique est détecté. Aucune largeur minimale de région n'est
+    imposée (un pic d'1 seul bin au-dessus du seuil est un signal valide :
+    typique pour du narrowband FM/DMR/PMR), pour rester cohérent avec le
+    détecteur CFAR qui a le même comportement.
 
     Retourne une liste de dicts, triée par SNR décroissant :
       [
@@ -398,15 +299,13 @@ def detect_all_signals(psd, center_freq_hz, sample_rate,
     """
     freqs    = center_freq_hz + np.fft.fftshift(np.fft.fftfreq(fft_size, d=1.0 / sample_rate))
     floor    = noise_floor(psd)
-    above    = psd > (floor + above_db)
+    above    = psd > (floor + snr_threshold_db)
 
     labeled, n_regions = ndimage_label(above)
     signals = []
 
     for region_id in range(1, n_regions + 1):
         mask = labeled == region_id
-        if np.sum(mask) < min_bins:
-            continue
 
         # Puissance et position du pic dans la région
         region_psd  = psd.copy()
@@ -414,9 +313,6 @@ def detect_all_signals(psd, center_freq_hz, sample_rate,
         peak_bin    = int(np.argmax(region_psd))
         peak_val    = float(psd[peak_bin])
         snr_db      = peak_val - floor
-
-        if snr_db < snr_threshold_db:
-            continue
 
         # Fréquence exacte avec interpolation parabolique
         if 0 < peak_bin < fft_size - 1:
@@ -461,5 +357,144 @@ def detect_all_signals(psd, center_freq_hz, sample_rate,
         })
 
     # Trier par SNR décroissant
+    signals.sort(key=lambda s: s['snr_db'], reverse=True)
+    return signals
+
+
+# ─────────────────────────────────────────────
+#  DÉTECTION MULTI-SIGNAUX PAR SO-CFAR
+#  (Smallest-Of Constant False Alarm Rate)
+# ─────────────────────────────────────────────
+
+def cfar_threshold_offset_db(train_cells, pfa):
+    """
+    Calcule le seuil CFAR (en dB au-dessus du niveau de bruit local estimé)
+    """
+    n = max(1, train_cells)
+    alpha = n * (pfa ** (-1.0 / n) - 1.0)
+    alpha = max(alpha, 1e-6)
+    return 10.0 * np.log10(alpha)
+
+
+def local_noise_estimates_db(psd_linear, guard_cells, train_cells):
+    """
+    Pour chaque bin, calcule le niveau de bruit local "Smallest-Of" :
+    moyenne (en puissance linéaire) des cellules d'entraînement à gauche,
+    moyenne des cellules d'entraînement à droite, puis on garde le MIN
+    des deux.
+    """
+    n = len(psd_linear)
+    win = guard_cells + train_cells
+    noise = np.empty(n, dtype=np.float64)
+
+    # Sommes cumulées pour calculer les moyennes de fenêtre en O(1) par bin
+    csum = np.concatenate(([0.0], np.cumsum(psd_linear)))
+
+    def window_mean(lo, hi):
+        # moyenne sur psd_linear[lo:hi] (hi exclu), avec bornage aux limites du tableau
+        lo = max(0, lo)
+        hi = min(n, hi)
+        if hi <= lo:
+            return None
+        return (csum[hi] - csum[lo]) / (hi - lo)
+
+    for i in range(n):
+        left_hi  = i - guard_cells
+        left_lo  = i - win
+        right_lo = i + guard_cells + 1
+        right_hi = i + win + 1
+
+        left_mean  = window_mean(left_lo, left_hi)
+        right_mean = window_mean(right_lo, right_hi)
+
+        candidates = [m for m in (left_mean, right_mean) if m is not None]
+        if not candidates:
+            noise[i] = psd_linear[i]  # cas dégénéré (FFT minuscule)
+        else:
+            # SO-CFAR : le plus petit des deux bruits locaux
+            noise[i] = min(candidates)
+
+    return noise
+
+
+def detect_all_signals_cfar(psd, center_freq_hz, sample_rate,
+                             fft_size=DEFAULT_FFT_SIZE,
+                             guard_cells=DEFAULT_CFAR_GUARD_CELLS,
+                             train_cells=DEFAULT_CFAR_TRAIN_CELLS,
+                             pfa=DEFAULT_CFAR_PFA,
+                             min_bw_hz=100,
+                             max_bw_hz=500_000):
+    """
+    Détecte TOUS les signaux via un SO-CFAR (Smallest-Of CFAR) au lieu
+    d'un seuil fixe par rapport au plancher de bruit global.
+    """
+    freqs = center_freq_hz + np.fft.fftshift(np.fft.fftfreq(fft_size, d=1.0 / sample_rate))
+    floor = noise_floor(psd)  # gardé uniquement pour le reporting SNR
+
+    # Passage en puissance linéaire pour le calcul du bruit local CFAR
+    psd_linear = np.power(10.0, psd / 10.0)
+    noise_local_linear = local_noise_estimates_db(psd_linear, guard_cells, train_cells)
+    noise_local_db = 10.0 * np.log10(noise_local_linear + 1e-20)
+
+    cfar_offset_db = cfar_threshold_offset_db(train_cells, pfa)
+    threshold_db = noise_local_db + cfar_offset_db
+
+    above = psd > threshold_db
+
+    labeled, n_regions = ndimage_label(above)
+    signals = []
+
+    for region_id in range(1, n_regions + 1):
+        mask = labeled == region_id
+
+        region_psd = psd.copy()
+        region_psd[~mask] = -999
+        peak_bin = int(np.argmax(region_psd))
+        peak_val = float(psd[peak_bin])
+        snr_db   = peak_val - floor  # reporting uniquement, ne filtre pas la détection
+
+        # Fréquence exacte avec interpolation parabolique
+        if 0 < peak_bin < fft_size - 1:
+            alpha = psd[peak_bin - 1]
+            beta  = psd[peak_bin]
+            gamma = psd[peak_bin + 1]
+            denom = alpha - 2 * beta + gamma
+            offset_bins = 0.5 * (alpha - gamma) / denom if denom != 0 else 0.0
+            bin_width   = sample_rate / fft_size
+            exact_freq  = float(freqs[peak_bin]) + offset_bins * bin_width
+        else:
+            exact_freq = float(freqs[peak_bin])
+
+        # Largeur de bande : même moteur robuste que detect_all_signals,
+        # référencé au plancher global pour rester cohérent visuellement.
+        bw_hz, freq_lo_rel, freq_hi_rel = compute_robust_bandwidth(
+            psd, peak_bin, sample_rate, fft_size,
+            threshold_db=DEFAULT_BW_THRESHOLD_DB, reference_is_floor=True
+        )
+
+        freq_lo = center_freq_hz + freq_lo_rel
+        freq_hi = center_freq_hz + freq_hi_rel
+
+        if bw_hz < min_bw_hz:
+            half = min_bw_hz / 2
+            mid  = (freq_lo + freq_hi) / 2
+            freq_lo, freq_hi = mid - half, mid + half
+            bw_hz = min_bw_hz
+        if bw_hz > max_bw_hz:
+            half = max_bw_hz / 2
+            mid  = (freq_lo + freq_hi) / 2
+            freq_lo, freq_hi = mid - half, mid + half
+            bw_hz = max_bw_hz
+
+        signals.append({
+            'freq_hz'  : exact_freq,
+            'snr_db'   : snr_db,
+            'peak_db'  : peak_val,
+            'floor_db' : floor,
+            'bw_hz'    : bw_hz,
+            'freq_lo'  : freq_lo,
+            'freq_hi'  : freq_hi,
+        })
+
     signals.sort(key=lambda s: s['snr_db'], reverse=True)
     return signals

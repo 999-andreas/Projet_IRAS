@@ -9,15 +9,16 @@ import numpy as np
 from datetime import datetime
 from config import (
     DEFAULT_FFT_SIZE, DEFAULT_N_AVG, SETTLE_SKIP_SAMPLES,
+    DEFAULT_CFAR_GUARD_CELLS, DEFAULT_CFAR_TRAIN_CELLS, DEFAULT_CFAR_PFA,
 )
 from sdr import UsbSdrClient, RtlTcpClient
 from rf_signal import (
     compute_averaged_psd, mask_dc_spike, noise_floor, peak_power,
     check_saturation, is_duplicate_signal,
-    detect_all_signals, isolate_central_signal
+    detect_all_signals, detect_all_signals_cfar, isolate_central_signal
 )
 from recording import IQProducer, record_iq, save_sample
-from visualization import save_debug_plot
+from visualization import save_debug_plot, save_hop_plot
 
 
 def scan(args, mode):
@@ -78,7 +79,11 @@ def scan(args, mode):
     print(f"  Plage       : {args.freq_start/1e6:.1f} – {args.freq_end/1e6:.1f} MHz")
     print(f"  Pas         : {args.freq_step/1e6:.2f} MHz  (BW captée : {args.sample_rate/1e6:.1f} MHz)")
     print(f"  Hops        : {total}")
-    print(f"  Seuil SNR   : +{args.snr_threshold} dB")
+    print(f"  Détecteur   : {'SO-CFAR' if args.detector == 'cfar' else 'Seuil fixe (threshold)'}")
+    if args.detector == "cfar":
+        print(f"  Seuil SNR   : (ignoré en mode CFAR — décision purement locale, voir config.py)")
+    else:
+        print(f"  Seuil SNR   : +{args.snr_threshold} dB")
     print(f"  Moyennage   : {args.n_avg} frames FFT (overlap 50 %)")
     print(f"  PPM corr.   : {args.ppm:+d} ppm")
     print(f"  Gain        : {args.gain} dB{' (AGC auto)' if args.gain == 0 else ''}")
@@ -136,17 +141,35 @@ def scan(args, mode):
             # ── Avertissement saturation ──
             sat_warn = "  ⚠ SATURATION" if check_saturation(psd) else ""
 
-            # ── Détection multi-signaux ──
-            signals = detect_all_signals(
-                psd, freq, args.sample_rate,
-                DEFAULT_FFT_SIZE, args.snr_threshold
-            )
+            # ── Détection multi-signaux (threshold classique ou SO-CFAR) ──
+            if args.detector == "cfar":
+                signals = detect_all_signals_cfar(
+                    psd, freq, args.sample_rate,
+                    fft_size=DEFAULT_FFT_SIZE
+                )
+            else:
+                signals = detect_all_signals(
+                    psd, freq, args.sample_rate,
+                    DEFAULT_FFT_SIZE, args.snr_threshold
+                )
 
             best_snr = signals[0]['snr_db'] if signals else (peak_power(psd) - floor)
             print(f"[{i+1:>4}/{total}] {freq/1e6:>9.3f} MHz  |  "
                   f"floor={floor:>+6.1f} dBFS  "
                   f"SNR={best_snr:>+5.1f} dB  "
                   f"signaux={len(signals)}{sat_warn}")
+
+            # ── Plot du hop : montre exactement comment la détection a décidé
+            #    sur CE spectre (même seuil que celui réellement appliqué) ──
+            hop_plot_path = save_hop_plot(
+                psd, freq, args.sample_rate, signals, run_dir, i + 1,
+                fft_size=DEFAULT_FFT_SIZE,
+                detector=args.detector,
+                snr_threshold=args.snr_threshold,
+                cfar_guard_cells=DEFAULT_CFAR_GUARD_CELLS,
+                cfar_train_cells=DEFAULT_CFAR_TRAIN_CELLS,
+                cfar_pfa=DEFAULT_CFAR_PFA,
+            )
 
             for sig in signals:
                 exact_freq = sig['freq_hz']
