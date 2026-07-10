@@ -1,0 +1,505 @@
+"""
+Traitement du signal : FFT, PSD, détection de pics, SNR, etc.
+"""
+
+import numpy as np
+from scipy.ndimage import label as ndimage_label
+from scipy.signal import iirfilter, lfilter
+from config import (
+    DEFAULT_FFT_SIZE, DEFAULT_N_AVG, DEFAULT_DC_WIDTH_BINS, DEFAULT_SNR_THRESHOLD,
+    SATURATION_THRESHOLD_DB, DEFAULT_BW_THRESHOLD_DB,
+    DEFAULT_CFAR_GUARD_CELLS, DEFAULT_CFAR_TRAIN_CELLS, DEFAULT_CFAR_PFA
+)
+  
+
+def isolate_central_signal(iq, current_sr, target_bw):
+    """
+    Filtre le signal IQ pour ne garder que la bande utile centrale.
+    (Conservé ici au cas où d'autres modules y font référence).
+    """
+    decim_factor = int(current_sr / (target_bw * 1.5))
+    if decim_factor <= 1:
+        return iq, current_sr
+    
+    nyquist = current_sr / 2
+    cutoff = (target_bw * 1.2) / 2
+    b, a = iirfilter(4, cutoff / nyquist, btype='lowpass', ftype='butter')
+    
+    iq_filtered = lfilter(b, a, iq)
+    iq_zoomed = iq_filtered[::decim_factor]
+    new_sr = current_sr / decim_factor
+    
+    return iq_zoomed, new_sr
+# ─────────────────────────────────────────────
+#  [1] FFT MOYENNÉE (Welch simplifié, 50 % overlap); 
+# ─────────────────────────────────────────────
+
+def compute_averaged_psd(samples, fft_size=DEFAULT_FFT_SIZE, n_avg=DEFAULT_N_AVG):
+    """
+    Densité spectrale de puissance moyennée sur N frames avec 50 % d'overlap.
+    """
+    window   = np.blackman(fft_size)
+    norm     = np.sum(window ** 2)
+    total    = np.zeros(fft_size, dtype=np.float64)
+    step     = fft_size // 2
+    count    = 0
+
+    for start in range(0, len(samples) - fft_size, step):
+        frame   = samples[start : start + fft_size]
+        fft_out = np.fft.fftshift(np.fft.fft(frame * window, fft_size))
+        total  += np.abs(fft_out) ** 2
+        count  += 1
+        if count >= n_avg:
+            break
+
+    if count == 0:
+        return np.full(fft_size, -120.0)
+
+    psd = 10 * np.log10(total / (count * norm) + 1e-20)
+    return psd
+
+
+# ─────────────────────────────────────────────
+#  [4] MASQUAGE DU DC SPIKE; le dc spike est un pic artificiel à 0 Hz (centre du spectre) causé par le convertisseur A/N.
+# ─────────────────────────────────────────────
+
+def mask_dc_spike(psd, fft_size=DEFAULT_FFT_SIZE, dc_width_bins=DEFAULT_DC_WIDTH_BINS):
+    """
+    Remplace les bins du DC spike par le minimum du spectre.
+    """
+    if dc_width_bins is None:
+        dc_width_bins = max(4, fft_size // 100)
+    center = fft_size // 2
+    psd    = psd.copy()
+    lo     = max(0, center - dc_width_bins)
+    hi     = min(fft_size, center + dc_width_bins)
+    psd[lo:hi] = np.min(psd)
+    return psd
+
+
+# ─────────────────────────────────────────────
+#  [6] PLANCHER DE BRUIT (10e percentile)
+# ─────────────────────────────────────────────
+
+def noise_floor(psd):
+    """
+    Estime le plancher de bruit avec le 10e percentile.
+    Plus robuste que la médiane en présence de nombreux signaux.
+    """
+    return float(np.percentile(psd, 10))
+
+
+# ─────────────────────────────────────────────
+#  [5] DÉTECTION DE PIC (NumPy + scipy.ndimage)
+# ─────────────────────────────────────────────
+
+def peak_power(psd, min_bins=10, above_db=6):
+    """
+    Détecte le pic le plus puissant sur au moins min_bins bins consécutifs.
+    Utilise scipy.ndimage.label pour étiqueter les régions connexes.
+    """
+    floor  = noise_floor(psd)
+    above  = psd > (floor + above_db)
+
+    labeled, n_regions = ndimage_label(above)
+    if n_regions == 0:
+        return floor
+
+    best = floor
+    for region_id in range(1, n_regions + 1):
+        mask = labeled == region_id
+        if np.sum(mask) >= min_bins:
+            best = max(best, float(np.max(psd[mask])))
+    return best
+
+
+def snr_value(psd):
+    """Retourne le SNR (pwr_pic - plancher_bruit) en dB."""
+    floor = noise_floor(psd)
+    pwr   = peak_power(psd)
+    return pwr - floor
+
+
+# ─────────────────────────────────────────────
+#  [10] VÉRIFICATION DE SATURATION
+# ─────────────────────────────────────────────
+#sert un peu à rien pour l'instant, c'est juste une info de debug
+def check_saturation(psd, threshold_db=SATURATION_THRESHOLD_DB):
+    """
+    Retourne True si le maximum du spectre dépasse le seuil.
+    Au dessus de ~-3 dBFS le convertisseur RTL-SDR écrête.
+    """
+    return float(np.max(psd)) >= threshold_db
+
+
+# ─────────────────────────────────────────────
+#  HEURISTIQUES DE CLASSIFICATION
+# ─────────────────────────────────────────────
+
+def estimate_bandwidth(samples, sample_rate, fft_size=DEFAULT_FFT_SIZE,
+                        n_avg=DEFAULT_N_AVG, threshold_db=DEFAULT_BW_THRESHOLD_DB):
+    """Estime la largeur de bande globale occupée en Hz."""
+    psd = compute_averaged_psd(samples, fft_size, n_avg)
+    psd = mask_dc_spike(psd, fft_size)
+    
+    peak_bin = int(np.argmax(psd))
+    
+    bw_hz, _, _ = compute_robust_bandwidth(
+        psd, peak_bin, sample_rate, fft_size, 
+        threshold_db=threshold_db, reference_is_floor=True
+    )
+    return bw_hz
+
+
+def is_duplicate_signal(freq_hz, detected_freqs, min_separation_hz):
+    """Retourne True si un signal trop proche a déjà été enregistré."""
+    return any(abs(freq_hz - d) <= min_separation_hz for d in detected_freqs)
+
+
+def dedupe_signals_intra_hop(signals, min_separation_hz):
+    """
+    Déduplique une liste de signaux ISSUE D'UN MÊME HOP (avant tout
+    enregistrement), en fusionnant ceux dont les fréquences sont à moins
+    de min_separation_hz les unes des autres.
+    """
+    kept = []
+    kept_freqs = []
+    for sig in signals:
+        f = sig['freq_hz']
+        if any(abs(f - kf) <= min_separation_hz for kf in kept_freqs):
+            continue
+        kept.append(sig)
+        kept_freqs.append(f)
+    return kept
+
+
+# ─────────────────────────────────────────────
+#  LOCALISATION PRÉCISE DU SIGNAL
+# ─────────────────────────────────────────────
+
+def peak_freq_hz(psd, center_freq_hz, sample_rate, fft_size=DEFAULT_FFT_SIZE):
+    """
+    Retourne la fréquence absolue (Hz) du bin le plus puissant dans le PSD.
+    Utilise une interpolation parabolique pour sub-bin accuracy.
+    """
+    # Fréquences correspondant à chaque bin
+    freqs = center_freq_hz + np.fft.fftshift(
+        np.fft.fftfreq(fft_size, d=1.0 / sample_rate)
+    )
+
+    peak_bin = int(np.argmax(psd))
+
+    # Interpolation parabolique sur les 3 bins autour du pic
+    if 0 < peak_bin < fft_size - 1:
+        alpha = psd[peak_bin - 1]
+        beta  = psd[peak_bin]
+        gamma = psd[peak_bin + 1]
+        denom = (alpha - 2 * beta + gamma)
+        if denom != 0:
+            offset_bins = 0.5 * (alpha - gamma) / denom
+        else:
+            offset_bins = 0.0
+        bin_width = sample_rate / fft_size
+        peak_hz = freqs[peak_bin] + offset_bins * bin_width
+    else:
+        peak_hz = freqs[peak_bin]
+
+    return float(peak_hz)
+
+def compute_robust_bandwidth(psd, peak_bin, sample_rate, fft_size=DEFAULT_FFT_SIZE, 
+                             threshold_db=DEFAULT_BW_THRESHOLD_DB, reference_is_floor=False):
+    """
+    Calcule la largeur de bande occupée de manière robuste autour d'un pic donné.
+    Gère les creux (vallées d'atténuation AM) grâce à une tolérance proportionnelle à la FFT (1%).
+    
+    Si reference_is_floor=True  : Le seuil est absolu (Plancher de bruit + threshold_db). -> (Pour détection globale/multi-signaux)
+    Si reference_is_floor=False : Le seuil est relatif (Valeur du pic - threshold_db).     -> (Pour occupied_bandwidth -N dB)
+    """
+    peak_val = psd[peak_bin]
+    
+    if reference_is_floor:
+        cutoff = noise_floor(psd) + threshold_db
+        # Si le pic lui-même n'atteint pas le seuil requis
+        if peak_val < cutoff:
+            return 0.0, 0.0, 0.0
+    else:
+        cutoff = peak_val - threshold_db
+
+    # Tolérance aux creux : 1% de la taille de la FFT (ex: 20 bins pour une FFT 2048)
+    gap_tolerance_bins = max(1, int(fft_size * 0.01))
+
+    # --- Extension vers la GAUCHE ---
+    lo = peak_bin
+    consecutive_gaps = 0
+    last_valid_lo = peak_bin
+    
+    while lo > 0:
+        lo -= 1
+        if psd[lo] >= cutoff:
+            consecutive_gaps = 0
+            last_valid_lo = lo
+        else:
+            consecutive_gaps += 1
+            if consecutive_gaps > gap_tolerance_bins:
+                break
+    lo = last_valid_lo
+
+    # --- Extension vers la DROITE ---
+    hi = peak_bin
+    consecutive_gaps = 0
+    last_valid_hi = peak_bin
+    
+    while hi < fft_size - 1:
+        hi += 1
+        if psd[hi] >= cutoff:
+            consecutive_gaps = 0
+            last_valid_hi = hi
+        else:
+            consecutive_gaps += 1
+            if consecutive_gaps > gap_tolerance_bins:
+                break
+    hi = last_valid_hi
+
+    # Conversion des bins en fréquences relatives (-Fs/2 à Fs/2)
+    bin_width_hz = sample_rate / fft_size
+    freq_lo_rel = (lo - fft_size // 2) * bin_width_hz
+    freq_hi_rel = (hi - fft_size // 2) * bin_width_hz
+    bw_hz = freq_hi_rel - freq_lo_rel
+
+    return float(bw_hz), float(freq_lo_rel), float(freq_hi_rel)
+
+# ─────────────────────────────────────────────
+#  DÉTECTION MULTI-SIGNAUX PAR HOP
+# ─────────────────────────────────────────────
+
+def detect_all_signals(psd, center_freq_hz, sample_rate,
+                       fft_size=DEFAULT_FFT_SIZE,
+                       snr_threshold_db=DEFAULT_SNR_THRESHOLD,
+                       min_bw_hz=100,
+                       max_bw_hz=500_000):
+    """
+    Détecte TOUS les signaux au-dessus du seuil SNR dans un PSD.
+
+    La détection des régions candidates se fait directement au seuil
+    (floor + snr_threshold_db) - c'est exactement la ligne rouge tracée
+    par save_hop_plot(), donc tout ce qui dépasse visuellement le seuil
+    sur le graphique est détecté. Aucune largeur minimale de région n'est
+    imposée (un pic d'1 seul bin au-dessus du seuil est un signal valide :
+    typique pour du narrowband FM/DMR/PMR), pour rester cohérent avec le
+    détecteur CFAR qui a le même comportement.
+
+    Retourne une liste de dicts, triée par SNR décroissant :
+      [
+        {
+          'freq_hz'  : fréquence exacte du pic (Hz),
+          'snr_db'   : SNR individuel (dB),
+          'peak_db'  : puissance du pic (dBFS),
+          'floor_db' : plancher de bruit local (dBFS),
+          'bw_hz'    : largeur de bande occupée (Hz),
+          'freq_lo'  : bord bas (Hz),
+          'freq_hi'  : bord haut (Hz),
+        },
+        ...
+      ]
+    """
+    freqs    = center_freq_hz + np.fft.fftshift(np.fft.fftfreq(fft_size, d=1.0 / sample_rate))
+    floor    = noise_floor(psd)
+    above    = psd > (floor + snr_threshold_db)
+
+    labeled, n_regions = ndimage_label(above)
+    signals = []
+
+    for region_id in range(1, n_regions + 1):
+        mask = labeled == region_id
+
+        # Puissance et position du pic dans la région
+        region_psd  = psd.copy()
+        region_psd[~mask] = -999
+        peak_bin    = int(np.argmax(region_psd))
+        peak_val    = float(psd[peak_bin])
+        snr_db      = peak_val - floor
+
+        # Fréquence exacte avec interpolation parabolique
+        if 0 < peak_bin < fft_size - 1:
+            alpha = psd[peak_bin - 1]
+            beta  = psd[peak_bin]
+            gamma = psd[peak_bin + 1]
+            denom = alpha - 2 * beta + gamma
+            offset_bins = 0.5 * (alpha - gamma) / denom if denom != 0 else 0.0
+            bin_width   = sample_rate / fft_size
+            exact_freq  = float(freqs[peak_bin]) + offset_bins * bin_width
+        else:
+            exact_freq = float(freqs[peak_bin])
+
+        # logique unifiée (basée sur le plancher de bruit pour le multi-signal)
+        bw_hz, freq_lo_rel, freq_hi_rel = compute_robust_bandwidth(
+            psd, peak_bin, sample_rate, fft_size, 
+            threshold_db=DEFAULT_BW_THRESHOLD_DB, reference_is_floor=True
+        )
+
+        freq_lo = center_freq_hz + freq_lo_rel
+        freq_hi = center_freq_hz + freq_hi_rel
+
+        if bw_hz < min_bw_hz:
+            half    = min_bw_hz / 2
+            mid     = (freq_lo + freq_hi) / 2
+            freq_lo, freq_hi = mid - half, mid + half
+            bw_hz   = min_bw_hz
+        if bw_hz > max_bw_hz:
+            half    = max_bw_hz / 2
+            mid     = (freq_lo + freq_hi) / 2
+            freq_lo, freq_hi = mid - half, mid + half
+            bw_hz   = max_bw_hz
+
+        signals.append({
+            'freq_hz'  : exact_freq,
+            'snr_db'   : snr_db,
+            'peak_db'  : peak_val,
+            'floor_db' : floor,
+            'bw_hz'    : bw_hz,
+            'freq_lo'  : freq_lo,
+            'freq_hi'  : freq_hi,
+        })
+
+    # Trier par SNR décroissant
+    signals.sort(key=lambda s: s['snr_db'], reverse=True)
+    return signals
+
+
+# ─────────────────────────────────────────────
+#  DÉTECTION MULTI-SIGNAUX PAR SO-CFAR
+#  (Smallest-Of Constant False Alarm Rate)
+# ─────────────────────────────────────────────
+
+def cfar_threshold_offset_db(train_cells, pfa):
+    """
+    Calcule le seuil CFAR (en dB au-dessus du niveau de bruit local estimé)
+    """
+    n = max(1, train_cells)
+    alpha = n * (pfa ** (-1.0 / n) - 1.0)
+    alpha = max(alpha, 1e-6)
+    return 10.0 * np.log10(alpha)
+
+
+def local_noise_estimates_db(psd_linear, guard_cells, train_cells):
+    """
+    Pour chaque bin, calcule le niveau de bruit local "Smallest-Of" :
+    moyenne (en puissance linéaire) des cellules d'entraînement à gauche,
+    moyenne des cellules d'entraînement à droite, puis on garde le MIN
+    des deux (SO-CFAR).
+    """
+    n = len(psd_linear)
+    win = guard_cells + train_cells
+    noise = np.empty(n, dtype=np.float64)
+
+    # Sommes cumulées pour calculer les moyennes de fenêtre en O(1) par bin
+    csum = np.concatenate(([0.0], np.cumsum(psd_linear)))
+
+    def window_mean(lo, hi):
+        # moyenne sur psd_linear[lo:hi] (hi exclu), avec bornage aux limites du tableau
+        lo = max(0, lo)
+        hi = min(n, hi)
+        if hi <= lo:
+            return None
+        return (csum[hi] - csum[lo]) / (hi - lo)
+
+    for i in range(n):
+        left_hi  = i - guard_cells
+        left_lo  = i - win
+        right_lo = i + guard_cells + 1
+        right_hi = i + win + 1
+
+        left_mean  = window_mean(left_lo, left_hi)
+        right_mean = window_mean(right_lo, right_hi)
+
+        candidates = [m for m in (left_mean, right_mean) if m is not None]
+        if not candidates:
+            noise[i] = psd_linear[i]  # cas dégénéré (FFT minuscule)
+        else:
+            # SO-CFAR : le plus petit des deux bruits locaux
+            noise[i] = min(candidates)
+
+    return noise
+
+
+def detect_all_signals_cfar(psd, center_freq_hz, sample_rate,
+                             fft_size=DEFAULT_FFT_SIZE,
+                             guard_cells=DEFAULT_CFAR_GUARD_CELLS,
+                             train_cells=DEFAULT_CFAR_TRAIN_CELLS,
+                             pfa=DEFAULT_CFAR_PFA,
+                             min_bw_hz=100,
+                             max_bw_hz=500_000):
+    """
+    Détecte TOUS les signaux via un SO-CFAR (Smallest-Of CFAR) au lieu
+    d'un seuil fixe par rapport au plancher de bruit global.
+    """
+    freqs = center_freq_hz + np.fft.fftshift(np.fft.fftfreq(fft_size, d=1.0 / sample_rate))
+    floor = noise_floor(psd)  # gardé uniquement pour le reporting SNR
+
+    # Passage en puissance linéaire pour le calcul du bruit local CFAR
+    psd_linear = np.power(10.0, psd / 10.0)
+    noise_local_linear = local_noise_estimates_db(psd_linear, guard_cells, train_cells)
+    noise_local_db = 10.0 * np.log10(noise_local_linear + 1e-20)
+
+    cfar_offset_db = cfar_threshold_offset_db(train_cells, pfa)
+    threshold_db = noise_local_db + cfar_offset_db
+
+    above = psd > threshold_db
+
+    labeled, n_regions = ndimage_label(above)
+    signals = []
+
+    for region_id in range(1, n_regions + 1):
+        mask = labeled == region_id
+
+        region_psd = psd.copy()
+        region_psd[~mask] = -999
+        peak_bin = int(np.argmax(region_psd))
+        peak_val = float(psd[peak_bin])
+        snr_db   = peak_val - floor  # reporting uniquement, ne filtre pas la détection
+
+        # Fréquence exacte avec interpolation parabolique
+        if 0 < peak_bin < fft_size - 1:
+            alpha = psd[peak_bin - 1]
+            beta  = psd[peak_bin]
+            gamma = psd[peak_bin + 1]
+            denom = alpha - 2 * beta + gamma
+            offset_bins = 0.5 * (alpha - gamma) / denom if denom != 0 else 0.0
+            bin_width   = sample_rate / fft_size
+            exact_freq  = float(freqs[peak_bin]) + offset_bins * bin_width
+        else:
+            exact_freq = float(freqs[peak_bin])
+
+        # Largeur de bande : même moteur robuste que detect_all_signals,
+        # référencé au plancher global pour rester cohérent visuellement.
+        bw_hz, freq_lo_rel, freq_hi_rel = compute_robust_bandwidth(
+            psd, peak_bin, sample_rate, fft_size,
+            threshold_db=DEFAULT_BW_THRESHOLD_DB, reference_is_floor=True
+        )
+
+        freq_lo = center_freq_hz + freq_lo_rel
+        freq_hi = center_freq_hz + freq_hi_rel
+
+        if bw_hz < min_bw_hz:
+            half = min_bw_hz / 2
+            mid  = (freq_lo + freq_hi) / 2
+            freq_lo, freq_hi = mid - half, mid + half
+            bw_hz = min_bw_hz
+        if bw_hz > max_bw_hz:
+            half = max_bw_hz / 2
+            mid  = (freq_lo + freq_hi) / 2
+            freq_lo, freq_hi = mid - half, mid + half
+            bw_hz = max_bw_hz
+
+        signals.append({
+            'freq_hz'  : exact_freq,
+            'snr_db'   : snr_db,
+            'peak_db'  : peak_val,
+            'floor_db' : floor,
+            'bw_hz'    : bw_hz,
+            'freq_lo'  : freq_lo,
+            'freq_hi'  : freq_hi,
+        })
+
+    signals.sort(key=lambda s: s['snr_db'], reverse=True)
+    return signals
