@@ -10,7 +10,7 @@ from config import (
     SATURATION_THRESHOLD_DB, DEFAULT_BW_THRESHOLD_DB,
     DEFAULT_CFAR_GUARD_CELLS, DEFAULT_CFAR_TRAIN_CELLS, DEFAULT_CFAR_PFA
 )
-    
+  
 
 def isolate_central_signal(iq, current_sr, target_bw):
     """
@@ -150,22 +150,27 @@ def estimate_bandwidth(samples, sample_rate, fft_size=DEFAULT_FFT_SIZE,
     )
     return bw_hz
 
-'''
-def am_fm_ratio(samples):
-    """
-    Ratio AM/FM heuristique.
-    Retourne (var_amplitude, var_phase).
-    """
-    amplitude = np.abs(samples)
-    phase     = np.unwrap(np.angle(samples))
-    var_amp   = float(np.var(amplitude / (np.mean(amplitude) + 1e-12)))
-    var_phase = float(np.var(np.diff(phase)))
-    return var_amp, var_phase
-'''
 
 def is_duplicate_signal(freq_hz, detected_freqs, min_separation_hz):
     """Retourne True si un signal trop proche a déjà été enregistré."""
     return any(abs(freq_hz - d) <= min_separation_hz for d in detected_freqs)
+
+
+def dedupe_signals_intra_hop(signals, min_separation_hz):
+    """
+    Déduplique une liste de signaux ISSUE D'UN MÊME HOP (avant tout
+    enregistrement), en fusionnant ceux dont les fréquences sont à moins
+    de min_separation_hz les unes des autres.
+    """
+    kept = []
+    kept_freqs = []
+    for sig in signals:
+        f = sig['freq_hz']
+        if any(abs(f - kf) <= min_separation_hz for kf in kept_freqs):
+            continue
+        kept.append(sig)
+        kept_freqs.append(f)
+    return kept
 
 
 # ─────────────────────────────────────────────
@@ -276,7 +281,7 @@ def detect_all_signals(psd, center_freq_hz, sample_rate,
     Détecte TOUS les signaux au-dessus du seuil SNR dans un PSD.
 
     La détection des régions candidates se fait directement au seuil
-    (floor + snr_threshold_db) — c'est exactement la ligne rouge tracée
+    (floor + snr_threshold_db) - c'est exactement la ligne rouge tracée
     par save_hop_plot(), donc tout ce qui dépasse visuellement le seuil
     sur le graphique est détecté. Aucune largeur minimale de région n'est
     imposée (un pic d'1 seul bin au-dessus du seuil est un signal valide :
@@ -381,7 +386,7 @@ def local_noise_estimates_db(psd_linear, guard_cells, train_cells):
     Pour chaque bin, calcule le niveau de bruit local "Smallest-Of" :
     moyenne (en puissance linéaire) des cellules d'entraînement à gauche,
     moyenne des cellules d'entraînement à droite, puis on garde le MIN
-    des deux.
+    des deux (SO-CFAR).
     """
     n = len(psd_linear)
     win = guard_cells + train_cells

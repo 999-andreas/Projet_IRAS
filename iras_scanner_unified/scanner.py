@@ -14,7 +14,7 @@ from config import (
 from sdr import UsbSdrClient, RtlTcpClient
 from rf_signal import (
     compute_averaged_psd, mask_dc_spike, noise_floor, peak_power,
-    check_saturation, is_duplicate_signal,
+    check_saturation, is_duplicate_signal, dedupe_signals_intra_hop,
     detect_all_signals, detect_all_signals_cfar, isolate_central_signal
 )
 from recording import IQProducer, record_iq, save_sample
@@ -159,8 +159,16 @@ def scan(args, mode):
                   f"SNR={best_snr:>+5.1f} dB  "
                   f"signaux={len(signals)}{sat_warn}")
 
-            # ── Plot du hop : montre exactement comment la détection a décidé
-            #    sur CE spectre (même seuil que celui réellement appliqué) ──
+            #  Déduplication INTRA-HOP : un même signal large (porteuse FM,
+            #    etc.) peut ressortir en plusieurs pics/régions proches
+            n_before_dedupe = len(signals)
+            signals = dedupe_signals_intra_hop(signals, args.min_separation_hz)
+            if len(signals) < n_before_dedupe:
+                print(f"           ↳ {n_before_dedupe - len(signals)} doublon(s) intra-hop fusionné(s) "
+                      f"({n_before_dedupe} → {len(signals)} signaux distincts)")
+
+            #  Plot du hop : montre exactement comment la détection a décidé
+            #    sur CE spectre (même seuil que celui réellement appliqué)
             hop_plot_path = save_hop_plot(
                 psd, freq, args.sample_rate, signals, run_dir, i + 1,
                 fft_size=DEFAULT_FFT_SIZE,
