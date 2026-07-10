@@ -1,0 +1,31 @@
+# Ignore dataset output directories
+/dataset/
+
+# Ignore Python cache and compilation artifacts
+__pycache__/
+*/__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore virtual environments and dependency build artifacts
+venv/
+.env/
+ENV/
+env/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Ignore editor and OS temporary files
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+
+ARCHITECTURE.md
+note_todo.txt
+
+# But keep this .gitignore itself
+!.gitignore
