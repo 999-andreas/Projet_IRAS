@@ -7,9 +7,8 @@ from config import (
     DEFAULT_FREQ_START, DEFAULT_FREQ_END, DEFAULT_FREQ_STEP,
     DEFAULT_SAMPLE_RATE, DEFAULT_GAIN, DEFAULT_PPM,
     DEFAULT_SNR_THRESHOLD, DEFAULT_RECORD_SECS, DEFAULT_OUTPUT_DIR,
-    DEFAULT_N_AVG, DEFAULT_DUPLICATE_HZ,
-    DEFAULT_RTL_TCP_HOST, DEFAULT_RTL_TCP_PORT, DEFAULT_TCP_TIMEOUT,
-    DEFAULT_DETECTOR
+    DEFAULT_N_AVG, DEFAULT_DUPLICATE_HZ, DEFAULT_DETECTOR,
+    DEFAULT_RTL_TCP_HOST, DEFAULT_RTL_TCP_PORT, DEFAULT_TCP_TIMEOUT
 )
 
 
@@ -41,6 +40,15 @@ def build_argument_parser():
     parser = argparse.ArgumentParser(
         description="IRAS Scanner v2 — Unified Edition (USB ou RTL-TCP)"
     )
+
+    # ── Mode de connexion (optionnel) ──────────
+    # Si fourni, bypass le menu interactif select_connection_mode()
+    # de cli.py — indispensable pour un lancement non-interactif (Docker,
+    # script automatisé, cron...), où un input() bloquerait indéfiniment
+    # faute de terminal attaché.
+    parser.add_argument("--mode", type=str, default=None, choices=["usb", "rtltcp"],
+                        help="Mode de connexion SDR. Si fourni, saute le menu interactif "
+                             "(nécessaire pour un lancement non-interactif, ex: Docker).")
 
     # ── Paramètres RTL-TCP (optionnels) ────────
     tcp = parser.add_argument_group("RTL-TCP (optionnel, pour mode réseau)")

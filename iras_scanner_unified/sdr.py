@@ -2,6 +2,7 @@
 Interface SDR et implémentations (USB et RTL-TCP).
 """
 
+import time
 import socket
 import struct
 import numpy as np
@@ -82,6 +83,27 @@ class RtlTcpClient(SdrInterface):
         print(f"  [rtl_tcp] Connecté — tuner type={tuner_type}, "
               f"gain steps={gain_count}")
 
+    def _flush_socket_buffer(self):
+        """
+        Vide activement le buffer de réception du socket TCP.
+        Passe temporairement le socket en mode non-bloquant pour consommer
+        tous les échantillons obsolètes déjà poussés par le serveur rtl_tcp.
+        """
+        if self._sock is None:
+            return
+
+        self._sock.setblocking(False)
+        try:
+            while True:
+                data = self._sock.recv(4096)
+                if not data:
+                    break
+        except (BlockingIOError, OSError):
+            pass  # Buffer vidé avec succès
+        finally:
+            self._sock.setblocking(True)
+            self._sock.settimeout(self._timeout)
+
     def _send_cmd(self, cmd: int, param: int):
         param_u32 = param & 0xFFFFFFFF
         pkt = struct.pack(">BI", cmd, param_u32)
@@ -110,6 +132,15 @@ class RtlTcpClient(SdrInterface):
     def center_freq(self, freq_hz: float):
         self._center_freq = int(freq_hz)
         self._send_cmd(self.CMD_SET_FREQ, self._center_freq)
+        
+        # 1. Purge immédiate du buffer accumulé avant/pendant l'envoi de la commande
+        self._flush_socket_buffer()
+        
+        # 2. Pause pour laisser le tuner/PLL physique se stabiliser
+        time.sleep(0.01)
+        
+        # 3. Seconde purge des échantillons de transition arrivés pendant le rétablissement
+        self._flush_socket_buffer()
 
     @property
     def sample_rate(self) -> float:
@@ -119,6 +150,11 @@ class RtlTcpClient(SdrInterface):
     def sample_rate(self, rate_hz: float):
         self._sample_rate = int(rate_hz)
         self._send_cmd(self.CMD_SET_SAMPLE_RATE, self._sample_rate)
+        
+        # Purge du buffer réseau pour éliminer les échantillons à l'ancien SR
+        self._flush_socket_buffer()
+        time.sleep(0.01)
+        self._flush_socket_buffer()
 
     @property
     def gain(self) -> float:
@@ -132,12 +168,15 @@ class RtlTcpClient(SdrInterface):
         else:
             self._send_cmd(self.CMD_SET_GAIN_MODE, 1)
             self._send_cmd(self.CMD_SET_GAIN, int(gain_db * 10))
+        self._flush_socket_buffer()
 
     def set_freq_correction(self, ppm: int):
         self._send_cmd(self.CMD_SET_FREQ_CORR, int(ppm))
+        self._flush_socket_buffer()
 
     def set_offset_tuning(self, enabled: bool):
         self._send_cmd(self.CMD_SET_OFFSET_TUNING, 1 if enabled else 0)
+        self._flush_socket_buffer()
 
     def read_samples(self, n_samples: int) -> np.ndarray:
         n = max(256, (int(n_samples) // 256) * 256)

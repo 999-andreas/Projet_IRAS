@@ -7,6 +7,7 @@ import json
 import numpy as np
 import threading
 import wave
+import time
 from datetime import datetime
 from config import SETTLE_SKIP_SAMPLES
 from visualization import save_debug_plot
@@ -15,6 +16,7 @@ from visualization import save_debug_plot
 #  [2] THREAD PRODUCTEUR
 # ─────────────────────────────────────────────
 
+#plus utilisé car débile 
 class IQProducer(threading.Thread):
     """
     Lit les samples en continu et les pousse dans une queue.
@@ -48,7 +50,13 @@ class IQProducer(threading.Thread):
 # ─────────────────────────────────────────────
 
 def record_iq(sdr, duration_sec, sample_rate):
-    """Enregistre duration_sec secondes d'IQ en chunks sûrs."""
+    """Enregistre duration_sec secondes d'IQ de manière synchrone."""
+    
+    # Purge initiale du transitoire / PLL
+    time.sleep(0.03)
+    if SETTLE_SKIP_SAMPLES > 0:
+        _ = sdr.read_samples(SETTLE_SKIP_SAMPLES)
+
     num_samples = int(sample_rate * duration_sec)
     chunk_size  = 16 * 1024
     chunks      = []

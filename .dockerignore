@@ -1,0 +1,18 @@
+# Fichier d'exclusion pour le build Docker 
+
+# Sorties de scan
+dataset/
+*.wav
+*.png
+
+# Fichiers Python compilés / cache
+__pycache__/
+*.pyc
+
+# Environnement Git, si tu en as un dans ce dossier
+.git/
+.gitignore
+
+# Fichiers d'environnement virtuel Python, si jamais tu en as un local
+venv/
+.venv/

@@ -28,12 +28,17 @@ from scanner import scan
 
 def main():
     """Point d'entrée principal."""
-    # Sélection du mode
-    mode = select_connection_mode()
-
-    # Parsing des arguments
+    # Parsing des arguments D'ABORD : on a besoin de savoir si --mode a
+    # été fourni avant de décider s'il faut afficher le menu interactif.
     parser = build_argument_parser()
     args = parser.parse_args()
+
+    # Si --mode est explicite (ex: lancement Docker/script automatisé),
+    # on saute select_connection_mode()
+    if args.mode is not None:
+        mode = args.mode
+    else:
+        mode = select_connection_mode()
 
     # Lancer le scan
     scan(args, mode)

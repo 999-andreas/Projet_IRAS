@@ -4,7 +4,6 @@ Boucle principale de scan.
 
 import os
 import time
-import queue
 import numpy as np
 from datetime import datetime
 from config import (
@@ -15,9 +14,9 @@ from sdr import UsbSdrClient, RtlTcpClient
 from rf_signal import (
     compute_averaged_psd, mask_dc_spike, noise_floor, peak_power,
     check_saturation, is_duplicate_signal, dedupe_signals_intra_hop,
-    detect_all_signals, detect_all_signals_cfar, isolate_central_signal
+    detect_all_signals, detect_all_signals_cfar, extract_and_center_signal
 )
-from recording import IQProducer, record_iq, save_sample
+from recording import save_sample
 from visualization import save_debug_plot, save_hop_plot
 
 
@@ -69,7 +68,20 @@ def scan(args, mode):
     detected       = 0
     detected_freqs = []
 
+    # Taille du buffer de DÉTECTION (n_avg trames FFT, comme avant).
     snap_size = DEFAULT_FFT_SIZE * (args.n_avg + 1)
+
+    # Taille du buffer COMPLET du hop, capturé UNE SEULE FOIS et utilisé
+    # à la fois pour la détection (ses n_avg premières trames, via
+    # snap_size ci-dessus) ET pour l'extraction de chaque signal détecté
+    # (extract_and_center_signal, plus bas). Fini le second enregistrement
+    # séparé par signal avec retune matériel : plus aucun retune, plus
+    # aucun changement de sample_rate pendant le hop, donc plus de
+    # transitoire de PLL ni de buffer TCP à repurger à ce moment-là  
+    # le SDR reste simplement fixe sur (freq, args.sample_rate) pendant toute
+    # la durée du hop. Comportement strictement identique en USB et
+    # RTL-TCP
+    hop_capture_samples = max(snap_size, int(args.sample_rate * args.record_secs))
 
     mode_str = "USB" if mode == "usb" else "RTL-TCP"
     print(f"\n{'─'*65}")
@@ -85,6 +97,9 @@ def scan(args, mode):
     else:
         print(f"  Seuil SNR   : +{args.snr_threshold} dB")
     print(f"  Moyennage   : {args.n_avg} frames FFT (overlap 50 %)")
+    print(f"  Capture/hop : {hop_capture_samples/args.sample_rate:.2f} s "
+          f"({hop_capture_samples} échantillons, détection + extraction "
+          f"signaux sur le même buffer — aucun retune pendant le hop)")
     print(f"  PPM corr.   : {args.ppm:+d} ppm")
     print(f"  Gain        : {args.gain} dB{' (AGC auto)' if args.gain == 0 else ''}")
     print(f"  Output root : {args.output_dir}")
@@ -94,45 +109,26 @@ def scan(args, mode):
     print(f"  Run folder  : {run_dir}")
     print(f"{'─'*65}\n")
 
-    buf_queue = queue.Queue(maxsize=5)
-
+    # code synchrone...
     try:
         for i, freq in enumerate(freqs):
             sdr.center_freq = freq
 
-            # [8] Stabilisation : rejet du buffer résiduel après retune
+            # Stabilisation & Purge du transitoire de retune (crucial pour RTL-TCP !)
             _ = sdr.read_samples(max(256, (SETTLE_SKIP_SAMPLES // 256) * 256))
             time.sleep(0.02)
 
-            # [2] Lancer le thread producteur
-            producer = IQProducer(sdr, buf_queue, snap_size)
-            producer.start()
-
-            # Collecter les samples depuis la queue
-            collected = []
-            while sum(len(c) for c in collected) < snap_size:
-                try:
-                    chunk = buf_queue.get(timeout=2.0)
-                    collected.append(chunk)
-                except queue.Empty:
-                    break
-
-            producer.stop()
-            producer.join(timeout=1.0)
-            # Vider la queue pour le prochain hop
-            while not buf_queue.empty():
-                try:
-                    buf_queue.get_nowait()
-                except queue.Empty:
-                    break
-
-            if not collected:
-                print(f"[{i+1:>4}/{total}] {freq/1e6:>9.3f} MHz  ← TIMEOUT acquisition, hop ignoré")
+            # Capture UNIQUE et COMPLÈTE du hop : sert à la fois à la
+            # détection (ses premières trames) et à l'extraction de
+            # chaque signal détecté plus bas
+            try:
+                hop_iq = sdr.read_samples(hop_capture_samples)
+            except Exception as e:
+                print(f"[{i+1:>4}/{total}] {freq/1e6:>9.3f} MHz  ← ERREUR acquisition ({e}), hop ignoré")
                 continue
 
-            snap = np.concatenate(collected)[:snap_size]
-
-            # ── Traitement du signal ──
+            # ── Traitement du signal (détection sur le DÉBUT du buffer) ──
+            snap  = hop_iq[:snap_size]
             psd   = compute_averaged_psd(snap, DEFAULT_FFT_SIZE, args.n_avg)
             floor = noise_floor(psd)
             #psd   = mask_dc_spike(psd, DEFAULT_FFT_SIZE)
@@ -189,42 +185,29 @@ def scan(args, mode):
                     print(f"           ↳ DOUBLON {exact_freq/1e6:.4f} MHz — ignoré")
                     continue
 
-                # Si le signal est étroit, on serre le filtre pour chasser les voisins.
+                # Largeur du filtre d'extraction : marge selon que le
+                # signal est large (FM) ou étroit (AM/PMR), inchangé
                 if bw_hz > 100_000:
-                    decim_bw = max(bw_hz * 1.2, 150_000)  # Marge de sécurité pour la déviation FM
+                    decim_bw = max(bw_hz * 1.2, 150_000)
                 else:
-                    decim_bw = max(bw_hz * 1.3, 12_000)   # Filtre minime (minimum 12 kHz)
+                    decim_bw = max(bw_hz * 1.3, 12_000)
 
-                # Le théorème de Nyquist-Shannon + du rab un ratio d'environ 2.5x.
-                target_sr = decim_bw * 2.5
-                
-                # Le driver RTL-SDR rejette les valeurs entre 300 kHz et 900 kHz.
-                # On choisit donc le palier de 256 kHz si ça passe, sinon on saute direct à 900 kHz.
-                if target_sr <= 256_000:
-                    record_sr = 256_000
-                else:
-                    record_sr = 900_010
-                
-                # Sécurité : On ne dépasse jamais le sample rate maximum demandé par l'utilisateur
-                record_sr = min(record_sr, args.sample_rate)
-                print(f"           ↳ ENREGISTREMENT {exact_freq/1e6:.4f} MHz  "
-                      f"SNR={snr_val:>+5.1f} dB  BW≈{bw_hz/1e3:.0f} kHz  "
-                      f"SR={record_sr/1e3:.0f} kHz ...", end="", flush=True)
+                print(f"           ↳ EXTRACTION {exact_freq/1e6:.4f} MHz  "
+                      f"SNR={snr_val:>+5.1f} dB  BW≈{bw_hz/1e3:.0f} kHz ...",
+                      end="", flush=True)
 
-                # Retuner + stabiliser sur le signal exact
-                sdr.center_freq = exact_freq
-                _ = sdr.read_samples(max(256, (SETTLE_SKIP_SAMPLES // 256) * 256))
-                sdr.sample_rate = record_sr
+                # Extraction 100% numérique depuis le buffer déjà capturé :
+                # mixage complexe pour recentrer exact_freq sur 0 Hz, puis
+                # filtre passe-bas + décimation vers la bande utile.
+                # AUCUN retune, AUCUN changement de sample_rate ici
+                iq_clean, sample_rate_clean = extract_and_center_signal(
+                    hop_iq, freq, exact_freq, args.sample_rate, decim_bw
+                )
 
-                iq        = record_iq(sdr, args.record_secs, record_sr)
-                iq_clean, sample_rate_clean = isolate_central_signal(iq, record_sr, decim_bw) #on isole le signal central pour éviter les voisins
                 path      = save_sample(iq_clean, exact_freq, snr_val, sample_rate_clean, run_dir, bw_hz)
                 base_name = os.path.basename(path).replace(".wav", "")
                 path_png  = save_debug_plot(iq_clean, exact_freq, sample_rate_clean, run_dir,
                                             base_name, args.snr_threshold)
-
-                # Restaurer le SR de scan
-                sdr.sample_rate = args.sample_rate
 
                 detected += 1
                 detected_freqs.append(exact_freq)

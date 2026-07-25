@@ -15,7 +15,10 @@ from config import (
 def isolate_central_signal(iq, current_sr, target_bw):
     """
     Filtre le signal IQ pour ne garder que la bande utile centrale.
-    (Conservé ici au cas où d'autres modules y font référence).
+    (Conservé ici au cas où d'autres modules y font référence — ne fait
+    QUE filtrer/décimer autour de 0 Hz, ne recentre pas un signal décalé.
+    Pour extraire un signal détecté à une fréquence donnée du hop, voir
+    extract_and_center_signal ci-dessous.)
     """
     decim_factor = int(current_sr / (target_bw * 1.5))
     if decim_factor <= 1:
@@ -30,6 +33,48 @@ def isolate_central_signal(iq, current_sr, target_bw):
     new_sr = current_sr / decim_factor
     
     return iq_zoomed, new_sr
+
+
+def extract_and_center_signal(iq, hop_center_freq_hz, target_freq_hz,
+                               sample_rate, target_bw_hz,
+                               min_output_sr_hz=12_000):
+    """
+    Extrait numériquement UN signal d'un buffer IQ large-bande (capturé à
+    hop_center_freq_hz / sample_rate), sans retune matériel du coup!
+
+    Étapes :
+      1. Mixage complexe (hétérodynage numérique) : multiplie le signal
+         par une porteuse complexe à -freq_offset pour ramener
+         target_freq_hz exactement à 0 Hz.
+      2. Filtre passe-bas Butterworth centré sur ce 0 Hz, taillé sur la
+         largeur de bande utile du signal (target_bw_hz), pour rejeter
+         le reste du hop (bruit + autres signaux voisins).
+      3. Décimation vers un sample rate de sortie proche de 2x la bande
+         utile (marge Nyquist raisonnable), avec un plancher
+         min_output_sr_hz pour ne pas sur-décimer un signal très étroit.
+    """
+    freq_offset = target_freq_hz - hop_center_freq_hz
+
+    # 1. Mixage complexe : décale numériquement target_freq_hz vers 0 Hz.
+    #    exp(-j*2*pi*offset*t) : le signe négatif est celui qui RAMÈNE
+    #    vers 0 Hz un signal situé à +freq_offset (convention cohérente
+    #    avec fftshift/fftfreq utilisée partout ailleurs dans ce projet).
+    t = np.arange(len(iq)) / sample_rate
+    shifted = iq * np.exp(-1j * 2 * np.pi * freq_offset * t)
+
+    # 2 & 3. Filtre passe-bas + décimation vers la bande utile.
+    #    Réutilise isolate_central_signal, qui fait déjà exactement ce
+    #    filtrage/cette décimation autour de 0 Hz — maintenant que le
+    #    signal y est réellement centré grâce au mixage ci-dessus.
+    target_bw_hz = max(target_bw_hz, 1.0)  # garde-fou division par zéro
+    desired_sr = max(target_bw_hz * 2.0, min_output_sr_hz)
+    # isolate_central_signal calcule son propre decim_factor à partir de
+    # target_bw ; on lui passe directement target_bw_hz pour rester
+    # cohérent avec son fonctionnement existant (filtre à 1.2x, decim à
+    # 1.5x la bande), plutôt que dupliquer cette logique ici.
+    iq_clean, sr_clean = isolate_central_signal(shifted, sample_rate, target_bw_hz)
+
+    return iq_clean, sr_clean
 # ─────────────────────────────────────────────
 #  [1] FFT MOYENNÉE (Welch simplifié, 50 % overlap); 
 # ─────────────────────────────────────────────

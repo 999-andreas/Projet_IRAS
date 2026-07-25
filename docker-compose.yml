@@ -1,0 +1,33 @@
+services:
+  scanner:
+    # ── Build : construit l'image à partir du Dockerfile du projet ──
+    build: .
+
+    # Nom du container, pour le retrouver facilement avec
+    # `docker ps` / `docker logs` plutôt qu'un nom généré au hasard.
+    container_name: iras-scanner
+
+    # ── Volume : rend les résultats persistants sur la machine hôte ──
+    # Équivalent du -v qu'on a utilisé en ligne de commande : tout ce qui
+    # est écrit dans /app/dataset DANS le container apparaît en même
+    # temps dans ./dataset_local SUR ta machine, et y reste même après
+    # que le container soit arrêté/détruit.
+    volumes:
+      - ./dataset:/app/dataset
+
+    # ── Arguments passés à iras_scanner.py (ENTRYPOINT du Dockerfile) ──
+    # Équivalent de tout ce qu'on mettait après le nom de l'image dans
+    # `docker run ... iras-scanner --mode rtltcp ...`
+    command:
+      - --mode
+      - rtltcp
+      - --rtl-tcp-host
+      - "192.168.1.89"
+      - --rtl-tcp-port
+      - "1234"
+
+    # Affiche les logs directement dans le terminal en temps réel,
+    # comme le ferait `docker run` sans -d (pas de mode détaché ici,
+    # on veut voir le scan progresser en direct).
+    stdin_open: true
+    tty: true

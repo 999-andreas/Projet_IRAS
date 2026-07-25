@@ -38,7 +38,7 @@ DEFAULT_N_AVG           = 64        # nombre de frames à moyenner
 DEFAULT_DUPLICATE_HZ    = 200_000    # Hz - seuil anti-duplication
 DEFAULT_DC_WIDTH_BINS   = None      # None = auto (1 % des bins
 DEFAULT_BW_THRESHOLD_DB = 10        # Seuil unique et partagé pour la mesure de BW)
-SETTLE_SKIP_SAMPLES     = 0         # samples jetés après retune
+SETTLE_SKIP_SAMPLES     = 15000        # samples jetés après retune (pour laisser le temps au signal de se stabiliser)
 SATURATION_THRESHOLD_DB = -3.0      # niveau max avant avertissement
 
 # ─────────────────────────────────────────────
