@@ -1,21 +1,24 @@
 import numpy as np
 import h5py
 import tensorflow as tf
+from tensorflow.keras.utils import to_categorical 
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
 from iras_cnn1 import build_model
 
 # ── Paramètres ──────────────────────────────────────────────────
-HDF5_PATH = '/home/cawps/Bureau/IRAS/Datasets/GOLD_XYZ_OSC.0001_1024.hdf5'
+HDF5_PATH = '/home/cawps/Bureau/IRAS/Datasets/IRAS_11092026.hdf5'
 BATCH_SIZE = 256
-SNR_MIN = 0
+SNR_MIN = 5
+
+SHAPE = 4096
 
 # ── Récupérer les indices valides (SNR >= 0) ─────────────────────
 with h5py.File(HDF5_PATH, 'r') as f:
-    Z = f['Z'][:]
-    total = f['X'].shape[0]
+    Z = f['snr'][:]
+    total = f['iq'].shape[0]
 
-valid_idx = np.where(Z[:, 0] >= SNR_MIN)[0]
-valid_idx = valid_idx[:len(valid_idx)//10]
+valid_idx = np.where(Z >= SNR_MIN)[0]
+#valid_idx = valid_idx[:len(valid_idx)//10]
 np.random.shuffle(valid_idx)
 
 split = int(len(valid_idx) * 0.8)
@@ -29,16 +32,20 @@ def make_generator(indices, batch_size):
             batch = indices[i:i+batch_size]
             batch_sorted = np.sort(batch)  # h5py impose l'ordre croissant
             with h5py.File(HDF5_PATH, 'r') as f:
-                X = f['X'][batch_sorted]
-                Y = f['Y'][batch_sorted]
+                X = f['iq'][batch_sorted]
+                Y = f['label'][batch_sorted]
+            
+            #conversion one-hot
+            Y = to_categorical(Y, num_classes=2)
+
             yield X.astype(np.float32), Y.astype(np.float32)
     return generator
 
-num_classes = 24
+num_classes = 2
 dataset_train = tf.data.Dataset.from_generator(
     make_generator(train_idx, BATCH_SIZE),
     output_signature=(
-        tf.TensorSpec(shape=(None, 1024, 2), dtype=tf.float32),
+        tf.TensorSpec(shape=(None, SHAPE, 2), dtype=tf.float32),
         tf.TensorSpec(shape=(None, num_classes), dtype=tf.float32)
     )
 ).prefetch(tf.data.AUTOTUNE)
@@ -46,13 +53,13 @@ dataset_train = tf.data.Dataset.from_generator(
 dataset_test = tf.data.Dataset.from_generator(
     make_generator(test_idx, BATCH_SIZE),
     output_signature=(
-        tf.TensorSpec(shape=(None, 1024, 2), dtype=tf.float32),
+        tf.TensorSpec(shape=(None, SHAPE, 2), dtype=tf.float32),
         tf.TensorSpec(shape=(None, num_classes), dtype=tf.float32)
     )
 ).prefetch(tf.data.AUTOTUNE)
 
 # ── Modèle ──────────────────────────────────────────────────────
-model = build_model((1024, 2), num_classes)
+model = build_model((SHAPE, 2), num_classes)
 model.compile(
     optimizer='adam',
     loss='categorical_crossentropy',

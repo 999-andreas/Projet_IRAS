@@ -29,7 +29,7 @@ print(f"Samples I/Q disponibles : {len(I)}")
 
 # ── Modèle ──────────────────────────────────────────────────────
 model = build_model((1024, 2), 24)
-model.load_weights('../../IRASv1/best_model.h5')
+model.load_weights('../../IRASv1/model_final.h5')
 
 # ── Préparer tous les chunks d'un coup ──────────────────────────
 CHUNK = 1024
