@@ -122,3 +122,112 @@ def save_sample(iq, freq_hz, snr_db, sample_rate, output_dir, bw_hz=None):
         json.dump(meta, f, indent=2)
 
     return wav_path
+
+
+# ─────────────────────────────────────────────
+#  REJEU : HOP BRUT (pour sdr.FileReplaySdrClient)
+# ─────────────────────────────────────────────
+#
+# Contrairement à save_sample() (qui sauvegarde un signal DÉJÀ isolé et
+# normalisé pour l'écoute/le debug), les fonctions ci-dessous sauvegardent
+# et relisent le buffer IQ BRUT d'un hop ENTIER, tel que capturé par
+# sdr.read_samples() avant toute détection. C'est ce qui permet de rejouer
+# un scan complet (même pipeline de détection/extraction) sans RTL-SDR :
+# voir scanner.scan() (option --save-hop-iq) et sdr.FileReplaySdrClient.
+
+def save_hop_iq(iq, freq_hz, sample_rate, output_dir, hop_index):
+    """
+    Sauvegarde le buffer IQ brut d'un hop (pré-détection) en WAV stéréo I/Q
+    + métadonnées JSON, nommé pour correspondre au hop_XXXX_*.png produit
+    par visualization.save_hop_plot() (même base de nom).
+
+    Pas de renormalisation par le max (contrairement à save_sample) : les
+    échantillons du RTL-SDR sont déjà dans [-1, 1], et on veut conserver
+    l'échelle réelle du hop (plancher de bruit, saturation) pour que le
+    rejeu se comporte comme un vrai scan.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    base     = f"hop_{hop_index:04d}_{freq_hz/1e6:.3f}MHz"
+    wav_path = os.path.join(output_dir, base + ".iq.wav")
+    jpath    = os.path.join(output_dir, base + ".iq.json")
+
+    i_data = np.clip(iq.real * 32767, -32768, 32767).astype(np.int16)
+    q_data = np.clip(iq.imag * 32767, -32768, 32767).astype(np.int16)
+
+    stereo = np.empty(len(iq) * 2, dtype=np.int16)
+    stereo[0::2] = i_data
+    stereo[1::2] = q_data
+
+    with wave.open(wav_path, 'w') as f:
+        f.setnchannels(2)
+        f.setsampwidth(2)
+        f.setframerate(int(sample_rate))
+        f.writeframes(stereo.tobytes())
+
+    meta = {
+        "hop_index"    : hop_index,
+        "frequency_hz" : freq_hz,
+        "frequency_mhz": round(freq_hz / 1e6, 3),
+        "sample_rate"  : sample_rate,
+        "timestamp"    : datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "num_samples"  : len(iq),
+    }
+    with open(jpath, "w") as f:
+        json.dump(meta, f, indent=2)
+
+    return wav_path
+
+
+def load_hop_iq(wav_path):
+    """Relit un fichier .iq.wav écrit par save_hop_iq() → (iq complex64, sample_rate)."""
+    with wave.open(wav_path, 'r') as f:
+        sample_rate = f.getframerate()
+        n_frames    = f.getnframes()
+        raw         = f.readframes(n_frames)
+
+    stereo = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
+    iq = (stereo[0::2] + 1j * stereo[1::2]).astype(np.complex64)
+    return iq, sample_rate
+
+
+def list_hop_recordings(directory):
+    """
+    Scanne `directory` pour les paires hop_XXXX_*.iq.wav / .iq.json produites
+    par save_hop_iq(), et retourne une liste de dicts triée par fréquence :
+
+        {hop_index, freq_hz, sample_rate, num_samples, wav_path, json_path}
+
+    Utilisé par sdr.FileReplaySdrClient pour construire son index de rejeu.
+    Retourne une liste vide si le dossier n'existe pas ou ne contient aucun
+    hop enregistré (ex: dossier issu d'un scan sans --save-hop-iq).
+    """
+    entries = []
+    if not os.path.isdir(directory):
+        return entries
+
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".iq.json"):
+            continue
+        jpath = os.path.join(directory, name)
+        try:
+            with open(jpath) as f:
+                meta = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        wav_path = os.path.join(directory, name[:-len(".json")] + ".wav")
+        if not os.path.isfile(wav_path):
+            continue
+
+        entries.append({
+            "hop_index"  : meta.get("hop_index"),
+            "freq_hz"    : meta["frequency_hz"],
+            "sample_rate": meta["sample_rate"],
+            "num_samples": meta.get("num_samples"),
+            "wav_path"   : wav_path,
+            "json_path"  : jpath,
+        })
+
+    entries.sort(key=lambda e: e["freq_hz"])
+    return entries

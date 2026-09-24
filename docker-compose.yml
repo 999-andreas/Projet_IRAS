@@ -1,33 +1,47 @@
+# Docker Compose : décrit une fois pour toutes comment lancer le scanner,
+# pour ne plus avoir à retaper une longue commande `docker run` à chaque
+# fois. Une seule commande suffit ensuite : `docker compose up`.
+#
+# Ce service fait maintenant tourner un serveur FastAPI qui reste actif
+# en permanence (voir Dockerfile : ENTRYPOINT lance uvicorn), pas un
+# script CLI qui s'arrête après un scan. La configuration du scan
+# (fréquences, host RTL-TCP, détecteur...) ne passe plus par des
+# arguments au démarrage du container : elle est envoyée à la volée via
+# POST /scan/start (voir api.py, modèle ScanConfig), une fois le serveur
+# déjà lancé.
+
 services:
   scanner:
-    # ── Build : construit l'image à partir du Dockerfile du projet ──
+    # Construit l'image à partir du Dockerfile du dossier courant.
+    # (équivalent de "docker build -t iras-scanner ." fait automatiquement)
     build: .
 
     # Nom du container, pour le retrouver facilement avec
     # `docker ps` / `docker logs` plutôt qu'un nom généré au hasard.
     container_name: iras-scanner
 
+    # ── Port : rend le serveur FastAPI accessible depuis la machine hôte ──
+    # Format "port_sur_ta_machine:port_dans_le_container". Une fois le
+    # container lancé, le serveur est joignable depuis l'extérieur sur
+    # http://localhost:8000 (et ws://localhost:8000/scan/events pour le
+    # WebSocket). Si le port 8000 est déjà pris par autre chose sur ta
+    # machine, change uniquement le premier nombre (ex: "8001:8000") —
+    # le container continue d'écouter sur 8000 en interne.
+    ports:
+      - "8000:8000"
+
     # ── Volume : rend les résultats persistants sur la machine hôte ──
     # Équivalent du -v qu'on a utilisé en ligne de commande : tout ce qui
     # est écrit dans /app/dataset DANS le container apparaît en même
     # temps dans ./dataset_local SUR ta machine, et y reste même après
-    # que le container soit arrêté/détruit.
+    # que le container soit arrêté/détruit. C'est aussi ce dossier que
+    # FastAPI sert via StaticFiles (/static/...) pour que le frontend
+    # puisse charger les .wav et .png générés pendant le scan.
     volumes:
       - ./dataset:/app/dataset
 
-    # ── Arguments passés à iras_scanner.py (ENTRYPOINT du Dockerfile) ──
-    # Équivalent de tout ce qu'on mettait après le nom de l'image dans
-    # `docker run ... iras-scanner --mode rtltcp ...`
-    command:
-      - --mode
-      - rtltcp
-      - --rtl-tcp-host
-      - "192.168.1.89"
-      - --rtl-tcp-port
-      - "1234"
-
     # Affiche les logs directement dans le terminal en temps réel,
     # comme le ferait `docker run` sans -d (pas de mode détaché ici,
-    # on veut voir le scan progresser en direct).
+    # utile pour voir les requêtes/erreurs du serveur au fil de l'eau).
     stdin_open: true
     tty: true

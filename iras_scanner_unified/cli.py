@@ -19,17 +19,20 @@ def select_connection_mode():
     print("="*65)
     print("\n  [1] USB      — RTL-SDR branché directement (local)")
     print("  [2] RTL-TCP  — Connexion via serveur rtl_tcp (réseau)")
+    print("  [3] Replay   — Rejoue des hops IQ déjà enregistrés (sans SDR)")
     print()
 
     while True:
         try:
-            choice = input("  Choix [1 ou 2] : ").strip()
+            choice = input("  Choix [1, 2 ou 3] : ").strip()
             if choice == "1":
                 return "usb"
             elif choice == "2":
                 return "rtltcp"
+            elif choice == "3":
+                return "replay"
             else:
-                print("entrer 1 ou 2.")
+                print("entrer 1, 2 ou 3.")
         except KeyboardInterrupt:
             print("\n  Annulation.")
             exit(1)
@@ -46,7 +49,7 @@ def build_argument_parser():
     # de cli.py — indispensable pour un lancement non-interactif (Docker,
     # script automatisé, cron...), où un input() bloquerait indéfiniment
     # faute de terminal attaché.
-    parser.add_argument("--mode", type=str, default=None, choices=["usb", "rtltcp"],
+    parser.add_argument("--mode", type=str, default=None, choices=["usb", "rtltcp", "replay"],
                         help="Mode de connexion SDR. Si fourni, saute le menu interactif "
                              "(nécessaire pour un lancement non-interactif, ex: Docker).")
 
@@ -58,6 +61,22 @@ def build_argument_parser():
                      help=f"Port du serveur rtl_tcp (défaut: {DEFAULT_RTL_TCP_PORT})")
     tcp.add_argument("--rtl-tcp-timeout", type=float, default=DEFAULT_TCP_TIMEOUT,
                      help=f"Timeout socket en secondes (défaut: {DEFAULT_TCP_TIMEOUT}s)")
+
+    # ── Paramètres Replay (optionnels, pour mode fichier) ──
+    replay = parser.add_argument_group("Replay (optionnel, pour mode fichier — pas de SDR)")
+    replay.add_argument("--replay-dir",              type=str,   default=None,
+                       help="Dossier contenant des hops enregistrés avec --save-hop-iq "
+                            "(ex: un dossier ./dataset/AAAAMMJJ_HHMMSS d'un run précédent). "
+                            "Requis en --mode replay.")
+    replay.add_argument("--replay-freq-tolerance-hz", type=float, default=None,
+                       help="Écart max (Hz) toléré entre la fréquence demandée et la "
+                            "fréquence du hop enregistré le plus proche. Par défaut : pas "
+                            "de limite (on rejoue toujours le hop le plus proche).")
+    replay.add_argument("--iq-file", type=str, nargs="+", default=None,
+                       help="Fichier(s) WAV I/Q externe(s) (SDR++, SDR#, GQRX...) à rejouer "
+                            "directement, sans passer par import_iq_recording.py ni --replay-dir : "
+                            "converti(s) automatiquement puis rejoué(s) comme --mode replay. "
+                            "Fréquence déduite du nom de fichier ('..._<freq>Hz_...') si présente.")
 
     # ── Paramètres scanner ────────────────────
     scanner = parser.add_argument_group("Scanner")
@@ -91,6 +110,12 @@ def build_argument_parser():
                                f"vs plancher de bruit global) ou 'cfar' (SO-CFAR, seuil adaptatif "
                                f"local, meilleur pour signaux proches / bande non homogène) "
                                f"(défaut: {DEFAULT_DETECTOR})")
+    detection.add_argument("--save-hop-iq",         action="store_true", default=False,
+                          help="Sauvegarde le buffer IQ brut de chaque hop (hop_XXXX_*.iq.wav) "
+                               "en plus des signaux extraits, pour pouvoir rejouer ce run plus "
+                               "tard avec --mode replay --replay-dir <run_folder>. "
+                               "Attention : fichiers volumineux (≈ sample_rate × record_secs × 4 "
+                               "octets par hop).")
 
     # ── FFT et traitement ─────────────────────
     processing = parser.add_argument_group("Traitement du signal")

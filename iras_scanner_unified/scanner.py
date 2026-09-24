@@ -2,6 +2,7 @@
 Boucle principale de scan.
 """
 
+from asyncio import events
 import os
 import time
 import numpy as np
@@ -10,35 +11,60 @@ from config import (
     DEFAULT_FFT_SIZE, DEFAULT_N_AVG, SETTLE_SKIP_SAMPLES,
     DEFAULT_CFAR_GUARD_CELLS, DEFAULT_CFAR_TRAIN_CELLS, DEFAULT_CFAR_PFA,
 )
-from sdr import UsbSdrClient, RtlTcpClient
+from sdr import UsbSdrClient, RtlTcpClient, FileReplaySdrClient
 from rf_signal import (
     compute_averaged_psd, mask_dc_spike, noise_floor, peak_power,
     check_saturation, is_duplicate_signal, dedupe_signals_intra_hop,
     detect_all_signals, detect_all_signals_cfar, extract_and_center_signal
 )
-from recording import save_sample
+from recording import save_sample, save_hop_iq
 from visualization import save_debug_plot, save_hop_plot
+from scan_events import ScanEvents
 
+def scan(args, mode, events=None, stop_flag=None):
 
-def scan(args, mode):
     """
-    Boucle principale de scan :
-    - Crée le client SDR (USB ou RTL-TCP)
-    - Configure le hardware
-    - Balaye les fréquences
-    - Détecte, enregistre et trace les signaux
+        Boucle principale de scan :
+        - Crée le client SDR (USB, RTL-TCP, ou rejeu fichier)
+        - Configure le hardware (ignoré en rejeu)
+        - Balaye les fréquences
+        - Détecte, enregistre et trace les signaux
     """
+
+    # Initialisation neutre : si events est None, on utilise l'objet de base (qui ne fait rien)
+    events = events or ScanEvents()
+
+    # ── Import auto d'IQ externe (--iq-file) ──────────────────
+    # Convertit à la volée le(s) WAV externe(s) (SDR++/SDR#/GQRX...) vers un
+    # dossier de hops rejouables, puis bascule en mode replay dessus — évite
+    # de lancer import_iq_recording.py à la main avant chaque scan.
+    iq_files = getattr(args, "iq_file", None)
+    if iq_files:
+        from import_iq_recording import import_one
+        import_dir = os.path.join(args.output_dir, "_imported_iq", datetime.now().strftime("%Y%m%d_%H%M%S"))
+        os.makedirs(import_dir, exist_ok=True)
+        for i, path in enumerate(iq_files, start=1):
+            import_one(path, import_dir, hop_index=i,
+                       freq_hz_override=None, sample_rate_override=None, max_secs=None)
+        args.replay_dir = import_dir
+        mode = "replay"
 
     # ── Connexion SDR ──────────────────────────
     if mode == "usb":
         print(f"\n  Connexion au RTL-SDR USB…")
         sdr = UsbSdrClient()
-    else:  # rtltcp
+    elif mode == "rtltcp":
         print(f"\n  Connexion au serveur rtl_tcp → {args.rtl_tcp_host}:{args.rtl_tcp_port} …")
         sdr = RtlTcpClient(
             host    = args.rtl_tcp_host,
             port    = args.rtl_tcp_port,
             timeout = args.rtl_tcp_timeout,
+        )
+    else:  # replay — aucun matériel, on rejoue des hops déjà enregistrés
+        print(f"\n  Rejeu de hops enregistrés → {args.replay_dir}")
+        sdr = FileReplaySdrClient(
+            replay_dir        = args.replay_dir,
+            freq_tolerance_hz = getattr(args, "replay_freq_tolerance_hz", None),
         )
 
     sdr.sample_rate = args.sample_rate
@@ -83,7 +109,7 @@ def scan(args, mode):
     # RTL-TCP
     hop_capture_samples = max(snap_size, int(args.sample_rate * args.record_secs))
 
-    mode_str = "USB" if mode == "usb" else "RTL-TCP"
+    mode_str = {"usb": "USB", "rtltcp": "RTL-TCP", "replay": "Replay (fichier)"}.get(mode, mode)
     print(f"\n{'─'*65}")
     print(f"  IRAS Scanner v2 — Unified Edition ({mode_str})")
     if mode == "rtltcp":
@@ -109,62 +135,63 @@ def scan(args, mode):
     print(f"  Run folder  : {run_dir}")
     print(f"{'─'*65}\n")
 
+
+    # Notifier le début du scan
+    events.on_scan_start({
+        "mode": mode,
+        "freq_start": args.freq_start,
+        "freq_end": args.freq_end,
+        "freq_step": args.freq_step,
+        "sample_rate": args.sample_rate,
+        "snr_threshold": args.snr_threshold,
+        "detector": args.detector,
+        "total_hops": total,
+        "run_dir": run_dir,
+        "output_dir": args.output_dir,
+    })
+
     # code synchrone...
     try:
         for i, freq in enumerate(freqs):
-            sdr.center_freq = freq
+            # ── 1. Vérification du bouton STOP ──
+            if stop_flag is not None and stop_flag.is_set():
+                events.on_scan_interrupted()
+                break
 
-            # Stabilisation & Purge du transitoire de retune (crucial pour RTL-TCP !)
+            sdr.center_freq = freq
             _ = sdr.read_samples(max(256, (SETTLE_SKIP_SAMPLES // 256) * 256))
             time.sleep(0.02)
 
-            # Capture UNIQUE et COMPLÈTE du hop : sert à la fois à la
-            # détection (ses premières trames) et à l'extraction de
-            # chaque signal détecté plus bas
+            # ── 2. Capture avec gestion des erreurs sur le Hop ──
             try:
                 hop_iq = sdr.read_samples(hop_capture_samples)
             except Exception as e:
-                print(f"[{i+1:>4}/{total}] {freq/1e6:>9.3f} MHz  ← ERREUR acquisition ({e}), hop ignoré")
+                events.on_hop_error(i + 1, total, freq, e)
                 continue
 
-            # ── Traitement du signal (détection sur le DÉBUT du buffer) ──
+            # Sauvegarde du hop BRUT (pré-détection) pour rejeu ultérieur
+            # sans RTL-SDR — voir recording.save_hop_iq / sdr.FileReplaySdrClient.
+            # Inutile (et redondant) en mode replay lui-même.
+            if getattr(args, "save_hop_iq", False) and mode != "replay":
+                save_hop_iq(hop_iq, freq, args.sample_rate, run_dir, i + 1)
+
+            # Traitement FFT & Détection
             snap  = hop_iq[:snap_size]
             psd   = compute_averaged_psd(snap, DEFAULT_FFT_SIZE, args.n_avg)
             floor = noise_floor(psd)
-            #psd   = mask_dc_spike(psd, DEFAULT_FFT_SIZE)
-            
+            is_sat = check_saturation(psd)
 
-            # ── Avertissement saturation ──
-            sat_warn = "  ⚠ SATURATION" if check_saturation(psd) else ""
-
-            # ── Détection multi-signaux (threshold classique ou SO-CFAR) ──
             if args.detector == "cfar":
-                signals = detect_all_signals_cfar(
-                    psd, freq, args.sample_rate,
-                    fft_size=DEFAULT_FFT_SIZE
-                )
+                signals = detect_all_signals_cfar(psd, freq, args.sample_rate, fft_size=DEFAULT_FFT_SIZE)
             else:
-                signals = detect_all_signals(
-                    psd, freq, args.sample_rate,
-                    DEFAULT_FFT_SIZE, args.snr_threshold
-                )
+                signals = detect_all_signals(psd, freq, args.sample_rate, DEFAULT_FFT_SIZE, args.snr_threshold)
 
             best_snr = signals[0]['snr_db'] if signals else (peak_power(psd) - floor)
-            print(f"[{i+1:>4}/{total}] {freq/1e6:>9.3f} MHz  |  "
-                  f"floor={floor:>+6.1f} dBFS  "
-                  f"SNR={best_snr:>+5.1f} dB  "
-                  f"signaux={len(signals)}{sat_warn}")
 
-            #  Déduplication INTRA-HOP : un même signal large (porteuse FM,
-            #    etc.) peut ressortir en plusieurs pics/régions proches
-            n_before_dedupe = len(signals)
+            # Déduplication intra-hop
             signals = dedupe_signals_intra_hop(signals, args.min_separation_hz)
-            if len(signals) < n_before_dedupe:
-                print(f"           ↳ {n_before_dedupe - len(signals)} doublon(s) intra-hop fusionné(s) "
-                      f"({n_before_dedupe} → {len(signals)} signaux distincts)")
 
-            #  Plot du hop : montre exactement comment la détection a décidé
-            #    sur CE spectre (même seuil que celui réellement appliqué)
+            # Sauvegarde graphique du hop
             hop_plot_path = save_hop_plot(
                 psd, freq, args.sample_rate, signals, run_dir, i + 1,
                 fft_size=DEFAULT_FFT_SIZE,
@@ -175,53 +202,60 @@ def scan(args, mode):
                 cfar_pfa=DEFAULT_CFAR_PFA,
             )
 
+            # ── 3. Notification du Hop Terminé ──
+            events.on_hop_complete(
+                hop_index=i + 1,
+                total_hops=total,
+                freq_hz=freq,
+                floor_db=floor,
+                best_snr_db=best_snr,
+                signals=signals,
+                saturation=is_sat,
+                hop_plot_path=hop_plot_path
+            )
+
+            # Traitement des signaux trouvés
             for sig in signals:
                 exact_freq = sig['freq_hz']
                 bw_hz      = sig['bw_hz']
                 snr_val    = sig['snr_db']
 
-                # Déduplication sur la fréquence exacte
                 if is_duplicate_signal(exact_freq, detected_freqs, args.min_separation_hz):
-                    print(f"           ↳ DOUBLON {exact_freq/1e6:.4f} MHz — ignoré")
+                    # ── 4. Notification Doublon ──
+                    events.on_signal_duplicate(exact_freq)
                     continue
 
-                # Largeur du filtre d'extraction : marge selon que le
-                # signal est large (FM) ou étroit (AM/PMR), inchangé
                 if bw_hz > 100_000:
                     decim_bw = max(bw_hz * 1.2, 150_000)
                 else:
                     decim_bw = max(bw_hz * 1.3, 12_000)
 
-                print(f"           ↳ EXTRACTION {exact_freq/1e6:.4f} MHz  "
-                      f"SNR={snr_val:>+5.1f} dB  BW≈{bw_hz/1e3:.0f} kHz ...",
-                      end="", flush=True)
-
-                # Extraction 100% numérique depuis le buffer déjà capturé :
-                # mixage complexe pour recentrer exact_freq sur 0 Hz, puis
-                # filtre passe-bas + décimation vers la bande utile.
-                # AUCUN retune, AUCUN changement de sample_rate ici
                 iq_clean, sample_rate_clean = extract_and_center_signal(
                     hop_iq, freq, exact_freq, args.sample_rate, decim_bw
                 )
 
-                path      = save_sample(iq_clean, exact_freq, snr_val, sample_rate_clean, run_dir, bw_hz)
+                path     = save_sample(iq_clean, exact_freq, snr_val, sample_rate_clean, run_dir, bw_hz)
                 base_name = os.path.basename(path).replace(".wav", "")
                 path_png  = save_debug_plot(iq_clean, exact_freq, sample_rate_clean, run_dir,
                                             base_name, args.snr_threshold)
 
                 detected += 1
                 detected_freqs.append(exact_freq)
-                print(f"\n           → Audio: {path}")
-                print(f"           → Debug: {path_png}")
+
+                # ── 5. Notification Signal Extrait ──
+                events.on_signal_extracted(
+                    freq_hz=exact_freq,
+                    snr_db=snr_val,
+                    bw_hz=bw_hz,
+                    wav_path=path,
+                    debug_plot_path=path_png
+                )
 
     except KeyboardInterrupt:
-        print("\n\nScan interrompu.")
+        events.on_scan_interrupted()
 
     finally:
         sdr.close()
 
-    # ── Résumé ──
-    print(f"\n{'─'*65}")
-    print(f"  Scan terminé : {detected} signal(s) enregistré(s) sur {total} fréquences")
-    print(f"  Dataset : {args.output_dir}")
-    print(f"{'─'*65}\n")
+    # ── 6. Notification de Fin de Scan ──
+    events.on_scan_end(detected, total, args.output_dir)

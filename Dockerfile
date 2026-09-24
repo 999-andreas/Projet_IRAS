@@ -24,4 +24,4 @@ COPY ./iras_scanner_unified .
 # --mode rtltcp --rtl-tcp-host ...) sont transmis ici automatiquement
 # grâce à la forme "exec" (liste), qui laisse ENTRYPOINT + CMD se
 # combiner proprement.
-ENTRYPOINT ["python", "iras_scanner.py"]
+ENTRYPOINT ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
