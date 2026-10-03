@@ -7,6 +7,7 @@ Scanner de signaux RF automatique avec support USB et RTL-TCP.
 Modes de connexion :
   [USB]     - RTL-SDR branché directement sur le PC (connexion locale)
   [RTL-TCP] - RTL-SDR accédé via un serveur rtl_tcp (réseau)
+  [REPLAY]  - Rejoue des hops IQ déjà enregistrés (--save-hop-iq), sans SDR
 
 Améliorations v2 :
   [1] Moyennage FFT    - N frames avec 50 % d'overlap (gain SNR ≈ √N)
@@ -28,12 +29,23 @@ from scanner import scan
 
 def main():
     """Point d'entrée principal."""
-    # Sélection du mode
-    mode = select_connection_mode()
-
-    # Parsing des arguments
+    # Parsing des arguments D'ABORD : on a besoin de savoir si --mode a
+    # été fourni avant de décider s'il faut afficher le menu interactif.
     parser = build_argument_parser()
     args = parser.parse_args()
+
+    # Si --mode est explicite (ex: lancement Docker/script automatisé),
+    # on saute select_connection_mode()
+    if args.iq_file:
+        # --iq-file bypass le menu et --mode : import auto + rejeu direct.
+        mode = "replay"
+    elif args.mode is not None:
+        mode = args.mode
+    else:
+        mode = select_connection_mode()
+
+    if mode == "replay" and not args.replay_dir and not args.iq_file:
+        parser.error("--mode replay nécessite --replay-dir <dossier> ou --iq-file <fichier(s)>")
 
     # Lancer le scan
     scan(args, mode)

@@ -1,0 +1,1031 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IRAS Scanner — Dashboard</title>
+<style>
+  :root{
+    --bg:#0d0d0d;
+    --surface:#1a1a19;
+    --surface-2:#212120;
+    --surface-3:#262624;
+    --border: rgba(255,255,255,0.10);
+    --border-strong: rgba(255,255,255,0.18);
+    --text:#ffffff;
+    --text-2:#c3c2b7;
+    --muted:#898781;
+    --grid:#2c2c2a;
+    --accent:#3987e5;
+    --accent-soft: rgba(57,135,229,0.14);
+    --accent-track: rgba(57,135,229,0.18);
+    --good:#0ca30c;
+    --good-soft: rgba(12,163,12,0.14);
+    --warning:#fab219;
+    --warning-soft: rgba(250,178,25,0.14);
+    --serious:#ec835a;
+    --critical:#d03b3b;
+    --critical-soft: rgba(208,59,59,0.16);
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    color-scheme: dark;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  h1,h2,h3{margin:0;font-weight:600;}
+  code{
+    font-family: var(--mono);
+    background: var(--surface-3);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 0.85em;
+    color: var(--text-2);
+  }
+  .tabular{ font-variant-numeric: tabular-nums; }
+
+  .app{
+    max-width: 1440px;
+    margin: 0 auto;
+    padding: 20px 24px 40px;
+  }
+
+  /* ---------- Topbar ---------- */
+  .topbar{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap: 16px;
+    padding: 14px 18px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 18px;
+    flex-wrap: wrap;
+  }
+  .brand{ display:flex; align-items:center; gap:12px; }
+  .brand-dot{
+    width: 10px; height:10px; border-radius:50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px var(--accent-soft);
+    flex-shrink:0;
+  }
+  .brand p{ margin:2px 0 0; color: var(--muted); font-size:12.5px; }
+  .topbar-actions{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+
+  .status-pill{
+    display:inline-flex; align-items:center; gap:7px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    border: 1px solid var(--border-strong);
+    color: var(--text-2);
+  }
+  .status-pill .dot{ width:7px;height:7px;border-radius:50%; background: var(--muted); }
+  .status-idle{ color: var(--muted); }
+  .status-idle .dot{ background: var(--muted); }
+  .status-running{ color: var(--accent); border-color: rgba(57,135,229,0.4); background: var(--accent-soft); }
+  .status-running .dot{ background: var(--accent); animation: pulse 1.1s infinite ease-in-out; }
+  .status-stopping{ color: var(--warning); border-color: rgba(250,178,25,0.4); background: var(--warning-soft); }
+  .status-stopping .dot{ background: var(--warning); }
+  .status-done{ color: var(--good); border-color: rgba(12,163,12,0.4); background: var(--good-soft); }
+  .status-done .dot{ background: var(--good); }
+  .status-critical{ color: #f18b8b; border-color: rgba(208,59,59,0.4); background: var(--critical-soft); }
+  .status-critical .dot{ background: var(--critical); }
+  @keyframes pulse{ 0%,100%{ opacity:1; } 50%{ opacity:0.35; } }
+
+  .ws-badge{ font-size: 11.5px; padding: 5px 10px; }
+
+  .btn{
+    font: inherit;
+    font-weight: 600;
+    font-size: 13px;
+    padding: 9px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-2);
+    color: var(--text);
+    cursor: pointer;
+    transition: background 0.12s ease, opacity 0.12s ease;
+  }
+  .btn:hover:not(:disabled){ background: var(--surface-3); }
+  .btn:disabled{ opacity:0.35; cursor:not-allowed; }
+  .btn-primary{ background: var(--accent); border-color: var(--accent); color:#fff; }
+  .btn-primary:hover:not(:disabled){ background:#2a78d6; }
+  .btn-danger{ background: transparent; border-color: rgba(208,59,59,0.5); color:#f0a8a8; }
+  .btn-danger:hover:not(:disabled){ background: var(--critical-soft); }
+  .btn-ghost{ background: transparent; border-color: var(--border); color: var(--text-2); font-size:12px; padding:6px 10px; }
+  .btn-ghost:hover:not(:disabled){ background: var(--surface-2); }
+
+  /* ---------- Layout ---------- */
+  .layout{
+    display:grid;
+    grid-template-columns: 340px 1fr;
+    gap: 18px;
+    align-items:start;
+  }
+  @media (max-width: 980px){
+    .layout{ grid-template-columns: 1fr; }
+  }
+
+  /* ---------- Config panel ---------- */
+  .config-panel{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 16px 16px;
+    position: sticky;
+    top: 20px;
+    max-height: calc(100vh - 40px);
+    overflow-y: auto;
+  }
+  fieldset{
+    border: none;
+    border-top: 1px solid var(--border);
+    padding: 12px 0 4px;
+    margin: 0;
+  }
+  fieldset:first-of-type{ border-top:none; }
+  legend{
+    padding: 0;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  .field{ margin-bottom: 10px; }
+  .field label{
+    display:block;
+    font-size: 12.5px;
+    color: var(--text-2);
+    margin-bottom: 4px;
+  }
+  .field .hint{
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 3px;
+  }
+  .field-row{ display:grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  input[type="text"], input[type="number"], select, textarea{
+    width: 100%;
+    font: inherit;
+    font-size: 13px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-strong);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 7px 9px;
+  }
+  textarea{ font-family: var(--mono); font-size:12px; resize: vertical; min-height: 46px; }
+  input:focus, select:focus, textarea:focus{ outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+  input:disabled, select:disabled, textarea:disabled{ opacity: 0.5; cursor:not-allowed; }
+  .checkline{ display:flex; align-items:center; gap:8px; }
+  .checkline input{ width:auto; }
+  .checkline label{ margin:0; }
+  .unit{ color: var(--muted); font-size:11.5px; margin-left:4px; }
+
+  .segmented{ display:flex; border: 1px solid var(--border-strong); border-radius:7px; overflow:hidden; }
+  .segmented button{
+    flex:1; background: var(--surface-2); color: var(--text-2); border:none;
+    padding: 8px 6px; font: inherit; font-size:12.5px; font-weight:600; cursor:pointer;
+    border-right: 1px solid var(--border-strong);
+  }
+  .segmented button:last-child{ border-right:none; }
+  .segmented button.active{ background: var(--accent); color:#fff; }
+
+  details.json summary{
+    cursor:pointer; font-size:12px; color: var(--accent); padding: 8px 0; list-style:none; font-weight:600;
+  }
+  details.json summary::-webkit-details-marker{ display:none; }
+  #jsonPreview{
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-2);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+
+  /* ---------- Monitor column ---------- */
+  .monitor{ display:flex; flex-direction:column; gap:18px; min-width:0; }
+  .card{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .card-header{
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom: 12px; gap:10px; flex-wrap:wrap;
+  }
+  .card-header h2{ font-size: 13px; text-transform:uppercase; letter-spacing:0.06em; color: var(--text-2); }
+
+  .stats-row{
+    display:grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+  }
+  @media (max-width: 1180px){ .stats-row{ grid-template-columns: repeat(3,1fr); } }
+  @media (max-width: 640px){ .stats-row{ grid-template-columns: repeat(2,1fr); } }
+  .stat-tile{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 13px 14px;
+  }
+  .stat-tile .label{ font-size: 11px; color: var(--muted); text-transform:uppercase; letter-spacing:0.05em; }
+  .stat-tile .value{ font-size: 21px; font-weight:700; margin-top:4px; }
+  .stat-tile .value small{ font-size: 12px; color: var(--muted); font-weight:500; }
+  .progress-track{
+    margin-top:8px; height:5px; border-radius:3px; background: var(--accent-track); overflow:hidden;
+  }
+  .progress-fill{
+    height:100%; width:0%; background: var(--accent); border-radius:3px;
+    transition: width 0.25s ease;
+  }
+
+  /* ---------- Sweep visual ---------- */
+  .sweep-wrap{ padding: 6px 4px 2px; }
+  .sweep-track{
+    position: relative;
+    height: 34px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .sweep-fill{
+    position:absolute; inset:0 auto 0 0; width:0%;
+    background: linear-gradient(90deg, rgba(57,135,229,0.05), rgba(57,135,229,0.35));
+    transition: width 0.2s linear;
+  }
+  .sweep-cursor{
+    position:absolute; top:0; bottom:0; width:2px; background: var(--accent);
+    box-shadow: 0 0 8px 1px rgba(57,135,229,0.8);
+    left:0%;
+    transition: left 0.2s linear;
+  }
+  .sweep-marker{
+    position:absolute; top:6px; width:6px; height:6px; margin-left:-3px;
+    border-radius:50%; background: var(--good);
+    box-shadow: 0 0 0 2px rgba(12,163,12,0.25);
+  }
+  .sweep-labels{
+    display:flex; justify-content:space-between;
+    font-size: 11px; color: var(--muted); margin-top:6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- Console ---------- */
+  .console-toolbar{ display:flex; align-items:center; gap:10px; }
+  .console-toolbar label{ font-size:12px; color: var(--text-2); display:flex; align-items:center; gap:5px; }
+  .console-body{
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    height: 300px;
+    overflow-y: auto;
+    padding: 8px 10px;
+    font-family: var(--mono);
+    font-size: 12.2px;
+    position: relative;
+  }
+  .log-line{ display:flex; gap:8px; padding: 2px 0; white-space: pre-wrap; word-break: break-word; align-items: baseline; }
+  .log-time{ color: var(--muted); flex-shrink:0; }
+  .log-tag{
+    flex-shrink:0; font-weight:700; font-size: 10.5px; padding: 1px 6px; border-radius: 4px;
+    text-transform: uppercase; letter-spacing: 0.03em; height: fit-content;
+  }
+  .tag-info{ background: var(--accent-soft); color: var(--accent); }
+  .tag-good{ background: var(--good-soft); color: #3fd23f; }
+  .tag-muted{ background: var(--surface-3); color: var(--muted); }
+  .tag-warning{ background: var(--warning-soft); color: var(--warning); }
+  .tag-critical{ background: var(--critical-soft); color: #f18b8b; }
+  .log-msg{ color: var(--text-2); }
+  .log-line.emph .log-msg{ color: var(--text); }
+  .log-link{ color: var(--accent); text-decoration:none; font-size: 11.5px; flex-shrink:0; }
+  .log-link:hover{ text-decoration:underline; }
+
+  /* ---------- Table ---------- */
+  table{ width:100%; border-collapse: collapse; font-size: 12.5px; }
+  thead th{
+    text-align:left; font-size: 11px; text-transform:uppercase; letter-spacing:0.05em;
+    color: var(--muted); font-weight:600; padding: 6px 8px; border-bottom: 1px solid var(--border);
+  }
+  tbody td{ padding: 7px 8px; border-bottom: 1px solid var(--grid); color: var(--text-2); }
+  tbody tr:last-child td{ border-bottom:none; }
+  tbody tr:hover{ background: var(--surface-2); }
+  .link-btn{ color: var(--accent); text-decoration:none; font-size:12px; margin-right:10px; }
+  .link-btn:hover{ text-decoration:underline; }
+  .empty-row td{ text-align:center; color: var(--muted); padding: 22px 0; }
+
+  footer.note{
+    margin-top: 20px;
+    font-size: 12px;
+    color: var(--muted);
+    line-height:1.6;
+    border-top: 1px solid var(--border);
+    padding-top: 14px;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <div>
+        <h1>IRAS Scanner</h1>
+        <p>Dashboard de pilotage — connecté à l'API (<code>/scan/*</code> + WebSocket <code>/scan/events</code>)</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="wsBadge" class="status-pill ws-badge status-idle"><span class="dot"></span><span id="wsText">connexion…</span></span>
+      <span id="statusPill" class="status-pill status-idle"><span class="dot"></span><span id="statusText">IDLE</span></span>
+      <button id="btnStart" class="btn btn-primary">▶ Démarrer le scan</button>
+      <button id="btnStop" class="btn btn-danger" disabled>■ Arrêter</button>
+    </div>
+  </header>
+
+  <div class="layout">
+
+    <!-- ============ CONFIG PANEL ============ -->
+    <aside class="config-panel">
+
+      <fieldset>
+        <legend>Connexion</legend>
+        <div class="field">
+          <label>Mode</label>
+          <div class="segmented" id="modeSelect">
+            <button type="button" data-mode="usb">USB</button>
+            <button type="button" data-mode="rtltcp" class="active">RTL-TCP</button>
+            <button type="button" data-mode="replay">Replay</button>
+          </div>
+        </div>
+
+        <div id="rtltcpFields">
+          <div class="field-row">
+            <div class="field">
+              <label>Hôte rtl_tcp</label>
+              <input type="text" id="rtl_tcp_host" value="192.168.1.89">
+            </div>
+            <div class="field">
+              <label>Port</label>
+              <input type="number" id="rtl_tcp_port" value="1234">
+            </div>
+          </div>
+          <div class="field">
+            <label>Timeout socket <span class="unit">s</span></label>
+            <input type="number" id="rtl_tcp_timeout" value="10" step="0.5">
+          </div>
+        </div>
+
+        <div id="replayFields" style="display:none;">
+          <div class="field">
+            <label>Source</label>
+            <div class="segmented" id="replaySourceSelect">
+              <button type="button" data-source="folder" class="active">Dossier (run précédent)</button>
+              <button type="button" data-source="external">Fichier(s) IQ externe(s)</button>
+            </div>
+            <p class="hint">Les deux rejouent des IQ sans SDR — seule la provenance change.</p>
+          </div>
+
+          <div id="replayFolderFields">
+            <div class="field">
+              <label>Dossier replay</label>
+              <input type="text" id="replay_dir" placeholder="./dataset/20260904_164334">
+              <p class="hint">Dossier d'un run précédent lancé avec --save-hop-iq (hops déjà enregistrés par ce scanner).</p>
+            </div>
+            <div class="field">
+              <label>Tolérance fréquence <span class="unit">Hz</span></label>
+              <input type="number" id="replay_freq_tolerance_hz" placeholder="illimité">
+            </div>
+          </div>
+
+          <div id="replayExternalFields" style="display:none;">
+            <div class="field">
+              <label>Fichiers IQ à rejouer (un chemin par ligne)</label>
+              <textarea id="iq_file" placeholder="/chemin/vers/capture_98.4MHz.wav"></textarea>
+              <p class="hint">WAV externes (SDR++/SDR#/GQRX...), convertis et rejoués automatiquement — fréquence déduite du nom de fichier si présente.</p>
+            </div>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Bande de fréquence</legend>
+        <div class="field-row">
+          <div class="field">
+            <label>Départ <span class="unit">MHz</span></label>
+            <input type="number" id="freq_start" value="88" step="0.1">
+          </div>
+          <div class="field">
+            <label>Fin <span class="unit">MHz</span></label>
+            <input type="number" id="freq_end" value="108" step="0.1">
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Pas <span class="unit">MHz</span></label>
+            <input type="number" id="freq_step" value="2" step="0.1">
+          </div>
+          <div class="field">
+            <label>Sample rate <span class="unit">MHz</span></label>
+            <input type="number" id="sample_rate" value="2.4" step="0.1">
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Gain &amp; correction</legend>
+        <div class="field-row">
+          <div class="field">
+            <label>Gain <span class="unit">dB (0 = AGC)</span></label>
+            <input type="number" id="gain" value="20" step="1">
+          </div>
+          <div class="field">
+            <label>PPM</label>
+            <input type="number" id="ppm" value="0" step="1">
+          </div>
+        </div>
+        <div class="checkline">
+          <input type="checkbox" id="offset_tuning">
+          <label for="offset_tuning">Offset tuning (déplace le DC spike)</label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Détection &amp; enregistrement</legend>
+        <div class="field-row">
+          <div class="field">
+            <label>Seuil SNR <span class="unit">dB</span></label>
+            <input type="number" id="snr_threshold" value="20" step="1">
+          </div>
+          <div class="field">
+            <label>Durée enreg. <span class="unit">s</span></label>
+            <input type="number" id="record_secs" value="3" step="0.5">
+          </div>
+        </div>
+        <div class="field">
+          <label>Anti-duplication <span class="unit">kHz</span></label>
+          <input type="number" id="min_separation_hz" value="200" step="10">
+        </div>
+        <div class="field">
+          <label>Détecteur</label>
+          <div class="segmented" id="detectorSelect">
+            <button type="button" data-detector="threshold" class="active">Threshold</button>
+            <button type="button" data-detector="cfar">CFAR</button>
+          </div>
+        </div>
+        <div class="checkline" style="margin-top:10px;">
+          <input type="checkbox" id="save_hop_iq">
+          <label for="save_hop_iq">Sauver l'IQ brut de chaque hop (replay ultérieur)</label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Traitement du signal</legend>
+        <div class="field">
+          <label>Frames moyennées (n_avg)</label>
+          <input type="number" id="n_avg" value="64" step="1">
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Sortie</legend>
+        <div class="field">
+          <label>Dossier de sortie</label>
+          <input type="text" id="output_dir" value="./dataset">
+        </div>
+      </fieldset>
+
+      <details class="json" id="jsonDetails">
+        <summary>Aperçu du payload envoyé à l'API</summary>
+        <pre id="jsonPreview">{}</pre>
+      </details>
+
+    </aside>
+
+    <!-- ============ MONITOR ============ -->
+    <main class="monitor">
+
+      <section class="stats-row">
+        <div class="stat-tile">
+          <div class="label">Progression</div>
+          <div class="value tabular"><span id="statHop">0</span> <small id="statHopTotal">/ 0</small></div>
+          <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+        </div>
+        <div class="stat-tile">
+          <div class="label">Fréquence courante</div>
+          <div class="value tabular"><span id="statFreq">—</span> <small>MHz</small></div>
+        </div>
+        <div class="stat-tile">
+          <div class="label">SNR / Plancher</div>
+          <div class="value tabular"><span id="statSnr">—</span> <small>/ <span id="statFloor">—</span> dB</small></div>
+        </div>
+        <div class="stat-tile">
+          <div class="label">Signaux détectés</div>
+          <div class="value tabular" id="statDetected">0</div>
+        </div>
+        <div class="stat-tile">
+          <div class="label">Écoulé / restant</div>
+          <div class="value tabular"><span id="statElapsed">00:00</span> <small>/ ~<span id="statEta">—</span></small></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>Balayage — <span id="sweepRange">88.0 – 108.0 MHz</span></h2>
+        </div>
+        <div class="sweep-wrap">
+          <div class="sweep-track" id="sweepTrack">
+            <div class="sweep-fill" id="sweepFill"></div>
+            <div class="sweep-cursor" id="sweepCursor"></div>
+          </div>
+          <div class="sweep-labels">
+            <span id="sweepMin">88.0</span>
+            <span id="sweepMid">98.0</span>
+            <span id="sweepMax">108.0</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>Logs en direct</h2>
+          <div class="console-toolbar">
+            <label><input type="checkbox" id="signalsOnly"> Signaux uniquement</label>
+            <button class="btn btn-ghost" id="btnClearLogs">Effacer</button>
+          </div>
+        </div>
+        <div class="console-body" id="consoleBody"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>Signaux détectés</h2>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Heure</th><th>Fréquence</th><th>SNR</th><th>BW</th><th>Fichiers</th></tr>
+          </thead>
+          <tbody id="signalsBody">
+            <tr class="empty-row"><td colspan="5">Aucun signal pour l'instant — lance un scan pour peupler cette liste.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="note">
+    Dashboard branché en direct sur l'API FastAPI du projet : <code>POST /scan/start</code>, <code>POST /scan/stop</code>, <code>GET /scan/status</code> et le WebSocket <code>/scan/events</code>. Comme le serveur diffuse les événements à tous les clients connectés, ce panneau reflète aussi un scan démarré depuis un autre onglet ou en ligne de commande — pas seulement ceux lancés d'ici.
+  </footer>
+
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------- Mode / detector segmented controls ----------
+  var mode = "rtltcp";
+  var detector = "threshold";
+  var replaySource = "folder";
+
+  document.getElementById("modeSelect").addEventListener("click", function(e){
+    var btn = e.target.closest("button[data-mode]");
+    if(!btn) return;
+    mode = btn.dataset.mode;
+    this.querySelectorAll("button").forEach(function(b){ b.classList.toggle("active", b===btn); });
+    document.getElementById("rtltcpFields").style.display = (mode === "rtltcp") ? "" : "none";
+    document.getElementById("replayFields").style.display = (mode === "replay") ? "" : "none";
+    updateJsonPreview();
+  }.bind(document.getElementById("modeSelect")));
+
+  document.getElementById("detectorSelect").addEventListener("click", function(e){
+    var btn = e.target.closest("button[data-detector]");
+    if(!btn) return;
+    detector = btn.dataset.detector;
+    this.querySelectorAll("button").forEach(function(b){ b.classList.toggle("active", b===btn); });
+    updateJsonPreview();
+  }.bind(document.getElementById("detectorSelect")));
+
+  document.getElementById("replaySourceSelect").addEventListener("click", function(e){
+    var btn = e.target.closest("button[data-source]");
+    if(!btn) return;
+    replaySource = btn.dataset.source;
+    this.querySelectorAll("button").forEach(function(b){ b.classList.toggle("active", b===btn); });
+    document.getElementById("replayFolderFields").style.display = (replaySource === "folder") ? "" : "none";
+    document.getElementById("replayExternalFields").style.display = (replaySource === "external") ? "" : "none";
+    updateJsonPreview();
+  }.bind(document.getElementById("replaySourceSelect")));
+
+  // ---------- JSON payload preview ----------
+  var configPanel = document.querySelector(".config-panel");
+  configPanel.addEventListener("input", updateJsonPreview);
+
+  function num(id){ var v = parseFloat(document.getElementById(id).value); return isNaN(v) ? null : v; }
+  function str(id){ var v = document.getElementById(id).value.trim(); return v === "" ? null : v; }
+  function bool(id){ return document.getElementById(id).checked; }
+
+  function buildConfig(){
+    var isReplay = (mode === "replay");
+    var useFolder = isReplay && replaySource === "folder";
+    var useExternal = isReplay && replaySource === "external";
+    var iqRaw = document.getElementById("iq_file").value.trim();
+    var iqList = iqRaw ? iqRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : null;
+    return {
+      mode: mode,
+      rtl_tcp_host: str("rtl_tcp_host"),
+      rtl_tcp_port: Math.round(num("rtl_tcp_port")),
+      rtl_tcp_timeout: num("rtl_tcp_timeout"),
+      replay_dir: useFolder ? str("replay_dir") : null,
+      replay_freq_tolerance_hz: useFolder ? num("replay_freq_tolerance_hz") : null,
+      iq_file: useExternal ? iqList : null,
+      freq_start: Math.round(num("freq_start") * 1e6),
+      freq_end: Math.round(num("freq_end") * 1e6),
+      freq_step: Math.round(num("freq_step") * 1e6),
+      sample_rate: Math.round(num("sample_rate") * 1e6),
+      gain: num("gain"),
+      ppm: Math.round(num("ppm")),
+      offset_tuning: bool("offset_tuning"),
+      snr_threshold: num("snr_threshold"),
+      record_secs: num("record_secs"),
+      min_separation_hz: Math.round(num("min_separation_hz") * 1000),
+      detector: detector,
+      save_hop_iq: bool("save_hop_iq"),
+      n_avg: Math.round(num("n_avg")),
+      output_dir: str("output_dir")
+    };
+  }
+
+  function updateJsonPreview(){
+    try{
+      document.getElementById("jsonPreview").textContent = JSON.stringify(buildConfig(), null, 2);
+    }catch(e){ /* champ incomplet pendant la saisie */ }
+  }
+  updateJsonPreview();
+
+  // ---------- DOM refs ----------
+  var statusPill = document.getElementById("statusPill");
+  var statusText = document.getElementById("statusText");
+  var wsBadge = document.getElementById("wsBadge");
+  var wsText = document.getElementById("wsText");
+  var btnStart = document.getElementById("btnStart");
+  var btnStop = document.getElementById("btnStop");
+  var consoleBody = document.getElementById("consoleBody");
+  var signalsBody = document.getElementById("signalsBody");
+  var autoScroll = true;
+
+  // ---------- Live state (driven by server events, not local guesses) ----------
+  var hopIndex = 0;
+  var totalHops = 0;
+  var detectedCount = 0;
+  var startTime = null;
+  var elapsedTimer = null;
+  var bounds = null; // {start, end} en Hz, fixé par l'event scan_start
+
+  consoleBody.addEventListener("scroll", function(){
+    var nearBottom = consoleBody.scrollHeight - consoleBody.scrollTop - consoleBody.clientHeight < 24;
+    autoScroll = nearBottom;
+  });
+
+  function setStatus(state, label){
+    statusPill.className = "status-pill status-" + state;
+    statusText.textContent = label;
+  }
+
+  function setWsStatus(state, label){
+    wsBadge.className = "status-pill ws-badge status-" + state;
+    wsText.textContent = label;
+  }
+
+  function setInputsDisabled(disabled){
+    configPanel.querySelectorAll("input, textarea, button[data-mode], button[data-detector], button[data-source]").forEach(function(el){
+      el.disabled = disabled;
+    });
+  }
+
+  function fmtTime(d){ return d.toTimeString().slice(0,8); }
+
+  function fmtDuration(s){
+    s = Math.max(0, Math.round(s));
+    var m = Math.floor(s/60), sec = s%60;
+    return String(m).padStart(2,"0") + ":" + String(sec).padStart(2,"0");
+  }
+
+  function logLine(type, tag, msg, opts){
+    opts = opts || {};
+    var row = document.createElement("div");
+    row.className = "log-line" + (opts.emph ? " emph" : "");
+    row.innerHTML =
+      '<span class="log-time">' + fmtTime(new Date()) + '</span>' +
+      '<span class="log-tag tag-' + type + '">' + tag + '</span>' +
+      '<span class="log-msg"></span>';
+    row.querySelector(".log-msg").textContent = msg;
+    if(opts.href){
+      var a = document.createElement("a");
+      a.className = "log-link";
+      a.href = opts.href;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = opts.linkLabel || "voir";
+      row.appendChild(a);
+    }
+    consoleBody.appendChild(row);
+    if(autoScroll){ consoleBody.scrollTop = consoleBody.scrollHeight; }
+  }
+
+  document.getElementById("signalsOnly").addEventListener("change", function(){
+    var only = this.checked;
+    consoleBody.querySelectorAll(".log-line").forEach(function(row){
+      var tag = row.querySelector(".log-tag").textContent;
+      var show = !only || ["SCAN_START","SIGNAL","SCAN_END","ERROR","INTERRUPTED"].indexOf(tag) !== -1;
+      row.style.display = show ? "" : "none";
+    });
+  });
+
+  document.getElementById("btnClearLogs").addEventListener("click", function(){
+    consoleBody.innerHTML = "";
+  });
+
+  function addSignalRow(freqHz, snr, bwHz, wavUrl, plotUrl){
+    var emptyRow = signalsBody.querySelector(".empty-row");
+    if(emptyRow) emptyRow.remove();
+    var tr = document.createElement("tr");
+    var links = "";
+    if(wavUrl) links += "<a class='link-btn' href='" + wavUrl + "' target='_blank' rel='noopener'>WAV</a>";
+    if(plotUrl) links += "<a class='link-btn' href='" + plotUrl + "' target='_blank' rel='noopener'>Plot</a>";
+    if(!links) links = "<span style='color:var(--muted);'>—</span>";
+    tr.innerHTML =
+      "<td class='tabular'>" + fmtTime(new Date()) + "</td>" +
+      "<td class='tabular'>" + (freqHz/1e6).toFixed(3) + " MHz</td>" +
+      "<td class='tabular'>" + snr.toFixed(1) + " dB</td>" +
+      "<td class='tabular'>" + (bwHz/1e3).toFixed(1) + " kHz</td>" +
+      "<td>" + links + "</td>";
+    signalsBody.prepend(tr);
+  }
+
+  function updateStatTiles(freqHz, floor, snr){
+    document.getElementById("statHop").textContent = hopIndex;
+    document.getElementById("statHopTotal").textContent = "/ " + totalHops;
+    document.getElementById("progressFill").style.width = (totalHops ? (100*hopIndex/totalHops) : 0) + "%";
+    if(freqHz != null) document.getElementById("statFreq").textContent = (freqHz/1e6).toFixed(3);
+    if(floor != null) document.getElementById("statFloor").textContent = floor.toFixed(1);
+    if(snr != null) document.getElementById("statSnr").textContent = snr.toFixed(1);
+    document.getElementById("statDetected").textContent = detectedCount;
+  }
+
+  function tickElapsed(){
+    if(startTime == null) return;
+    var elapsedS = (Date.now() - startTime) / 1000;
+    document.getElementById("statElapsed").textContent = fmtDuration(elapsedS);
+    if(hopIndex > 0 && totalHops > 0){
+      var perHop = elapsedS / hopIndex;
+      var remaining = perHop * (totalHops - hopIndex);
+      document.getElementById("statEta").textContent = fmtDuration(remaining);
+    }
+  }
+
+  function updateSweepVisual(freqHz){
+    if(!bounds) return;
+    var pct = bounds.end > bounds.start ? 100 * (freqHz - bounds.start) / (bounds.end - bounds.start) : 0;
+    pct = Math.max(0, Math.min(100, pct));
+    document.getElementById("sweepFill").style.width = pct + "%";
+    document.getElementById("sweepCursor").style.left = pct + "%";
+  }
+
+  function addSweepMarker(freqHz){
+    if(!bounds) return;
+    var pct = bounds.end > bounds.start ? 100 * (freqHz - bounds.start) / (bounds.end - bounds.start) : 0;
+    pct = Math.max(0, Math.min(100, pct));
+    var m = document.createElement("div");
+    m.className = "sweep-marker";
+    m.style.left = pct + "%";
+    m.title = (freqHz/1e6).toFixed(3) + " MHz";
+    document.getElementById("sweepTrack").appendChild(m);
+  }
+
+  function resetMonitor(){
+    hopIndex = 0;
+    totalHops = 0;
+    detectedCount = 0;
+    document.getElementById("statHop").textContent = "0";
+    document.getElementById("statHopTotal").textContent = "/ 0";
+    document.getElementById("progressFill").style.width = "0%";
+    document.getElementById("statFreq").textContent = "—";
+    document.getElementById("statFloor").textContent = "—";
+    document.getElementById("statSnr").textContent = "—";
+    document.getElementById("statDetected").textContent = "0";
+    document.getElementById("statElapsed").textContent = "00:00";
+    document.getElementById("statEta").textContent = "—";
+    document.getElementById("sweepFill").style.width = "0%";
+    document.getElementById("sweepCursor").style.left = "0%";
+    document.querySelectorAll(".sweep-marker").forEach(function(m){ m.remove(); });
+    signalsBody.innerHTML = "<tr class='empty-row'><td colspan='5'>Aucun signal pour l'instant — lance un scan pour peupler cette liste.</td></tr>";
+  }
+
+  function enterRunningUi(){
+    setStatus("running", "RUNNING");
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+    setInputsDisabled(true);
+  }
+
+  function leaveRunningUi(finalLabel, finalState){
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+    setInputsDisabled(false);
+    if(elapsedTimer){ clearInterval(elapsedTimer); elapsedTimer = null; }
+    if(finalState){
+      setStatus(finalState, finalLabel);
+      setTimeout(function(){ setStatus("idle", "IDLE"); }, 1600);
+    }
+  }
+
+  // ---------- REST calls ----------
+  function startScan(){
+    var cfg = buildConfig();
+    if(!cfg.freq_start || !cfg.freq_end || cfg.freq_end <= cfg.freq_start || !cfg.freq_step){
+      logLine("critical", "ERROR", "Configuration invalide : vérifie la bande de fréquence.", {emph:true});
+      return;
+    }
+    btnStart.disabled = true;
+    fetch("/scan/start", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(cfg)
+    }).then(function(r){ return r.json(); }).then(function(data){
+      if(data.status === "error"){
+        logLine("critical", "ERROR", "Démarrage refusé : " + data.message, {emph:true});
+        btnStart.disabled = false;
+      }
+      // si "started", on laisse l'event WS scan_start faire la transition d'UI
+      // (source de vérité commune à tous les clients connectés).
+    }).catch(function(err){
+      logLine("critical", "ERROR", "Impossible de joindre l'API (POST /scan/start) : " + err, {emph:true});
+      btnStart.disabled = false;
+    });
+  }
+
+  function stopScan(){
+    btnStop.disabled = true;
+    fetch("/scan/stop", { method: "POST" })
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        if(data.status === "error"){
+          logLine("warning", "ERROR", "Arrêt refusé : " + data.message);
+        }
+      }).catch(function(err){
+        logLine("critical", "ERROR", "Impossible de joindre l'API (POST /scan/stop) : " + err, {emph:true});
+      });
+  }
+
+  function refreshStatus(){
+    fetch("/scan/status").then(function(r){ return r.json(); }).then(function(data){
+      if(data.running){
+        enterRunningUi();
+        setStatus("running", "RUNNING (reconnecté)");
+        logLine("info", "SCAN_START", "Scan déjà en cours détecté au chargement de la page — en attente du prochain événement pour la progression.", {emph:true});
+      }
+    }).catch(function(){ /* API pas encore joignable, on retentera via le WS */ });
+  }
+
+  btnStart.addEventListener("click", startScan);
+  btnStop.addEventListener("click", stopScan);
+
+  // ---------- WebSocket : source de vérité pour l'état du scan ----------
+  var ws = null;
+  var wsRetryDelay = 1500;
+
+  function wsUrl(){
+    var proto = (location.protocol === "https:") ? "wss:" : "ws:";
+    return proto + "//" + location.host + "/scan/events";
+  }
+
+  function connectWs(){
+    setWsStatus("idle", "connexion…");
+    try{
+      ws = new WebSocket(wsUrl());
+    }catch(e){
+      scheduleReconnect();
+      return;
+    }
+
+    ws.onopen = function(){
+      setWsStatus("done", "live");
+      wsRetryDelay = 1500;
+    };
+
+    ws.onmessage = function(evt){
+      var data;
+      try{ data = JSON.parse(evt.data); }catch(e){ return; }
+      handleEvent(data);
+    };
+
+    ws.onclose = function(){
+      setWsStatus("critical", "hors-ligne");
+      scheduleReconnect();
+    };
+
+    ws.onerror = function(){
+      try{ ws.close(); }catch(e){}
+    };
+  }
+
+  function scheduleReconnect(){
+    setTimeout(connectWs, wsRetryDelay);
+    wsRetryDelay = Math.min(wsRetryDelay * 1.5, 15000);
+  }
+
+  function handleEvent(data){
+    switch(data.type){
+
+      case "scan_start":
+        resetMonitor();
+        bounds = { start: data.freq_start, end: data.freq_end };
+        totalHops = data.total_hops || 0;
+        startTime = Date.now();
+        if(elapsedTimer) clearInterval(elapsedTimer);
+        elapsedTimer = setInterval(tickElapsed, 1000);
+
+        document.getElementById("sweepRange").textContent =
+          (data.freq_start/1e6).toFixed(1) + " – " + (data.freq_end/1e6).toFixed(1) + " MHz";
+        document.getElementById("sweepMin").textContent = (data.freq_start/1e6).toFixed(1);
+        document.getElementById("sweepMid").textContent = ((data.freq_start+data.freq_end)/2e6).toFixed(1);
+        document.getElementById("sweepMax").textContent = (data.freq_end/1e6).toFixed(1);
+        document.getElementById("statHopTotal").textContent = "/ " + totalHops;
+
+        enterRunningUi();
+        logLine("info", "SCAN_START", "Bande " + (data.freq_start/1e6).toFixed(1) + "–" + (data.freq_end/1e6).toFixed(1) +
+          " MHz · pas " + (data.freq_step/1e6).toFixed(2) + " MHz · mode " + data.mode +
+          " · détecteur " + data.detector + " · " + totalHops + " hops", {emph:true});
+        break;
+
+      case "hop_complete":
+        hopIndex = data.hop_index;
+        totalHops = data.total_hops;
+        updateSweepVisual(data.freq_hz);
+        updateStatTiles(data.freq_hz, data.floor_db, data.best_snr_db);
+        logLine("muted", "HOP", "[" + data.hop_index + "/" + data.total_hops + "] " + (data.freq_hz/1e6).toFixed(3) +
+          " MHz · plancher " + data.floor_db.toFixed(1) + " dB · SNR " + data.best_snr_db.toFixed(1) + " dB" +
+          (data.saturation ? " · SATURATION" : ""),
+          data.hop_plot_url ? {href: data.hop_plot_url, linkLabel: "plot"} : {});
+        break;
+
+      case "signal_extracted":
+        detectedCount += 1;
+        addSweepMarker(data.freq_hz);
+        addSignalRow(data.freq_hz, data.snr_db, data.bw_hz, data.wav_url, data.debug_plot_url);
+        document.getElementById("statDetected").textContent = detectedCount;
+        logLine("good", "SIGNAL", "  └ " + (data.freq_hz/1e6).toFixed(4) + " MHz (SNR " + data.snr_db.toFixed(1) +
+          " dB, BW " + (data.bw_hz/1e3).toFixed(1) + " kHz)", {emph:true, href: data.wav_url, linkLabel: "wav"});
+        break;
+
+      case "signal_duplicate":
+        logLine("muted", "DUPLICATE", "  └ " + (data.freq_hz/1e6).toFixed(4) + " MHz ignoré (déjà connu)");
+        break;
+
+      case "hop_error":
+        logLine("critical", "ERROR", "[" + data.hop_index + "/" + data.total_hops + "] " +
+          (data.freq_hz/1e6).toFixed(3) + " MHz — " + data.error);
+        break;
+
+      case "scan_end":
+        logLine("info", "SCAN_END", data.detected_count + " signal(aux) sauvegardé(s) dans " +
+          data.output_dir + " sur " + data.total_hops + " hops.", {emph:true});
+        leaveRunningUi("TERMINÉ", "done");
+        break;
+
+      case "scan_interrupted":
+        logLine("warning", "INTERRUPTED", "Scan interrompu.", {emph:true});
+        leaveRunningUi("STOPPING", "stopping");
+        break;
+    }
+  }
+
+  // ---------- Boot ----------
+  refreshStatus();
+  connectWs();
+
+})();
+</script>
+</body>
+</html>

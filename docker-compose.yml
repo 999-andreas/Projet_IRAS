@@ -1,0 +1,25 @@
+# Ce service fait maintenant tourner un serveur FastAPI qui reste actif
+# en permanence (voir Dockerfile : ENTRYPOINT lance uvicorn), pas un
+# script CLI qui s'arrête après un scan. La configuration du scan
+# (fréquences, host RTL-TCP, détecteur...) ne passe plus par des
+# arguments au démarrage du container : elle est envoyée à la volée via
+# POST /scan/start (voir api.py, modèle ScanConfig), une fois le serveur
+# déjà lancé.
+
+services:
+  scanner:
+    # Construit l'image à partir du Dockerfile du dossier courant.
+    build: .
+
+    # Nom du container, pour le retrouver facilement avec
+    container_name: iras-scanner
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      - ./dataset:/app/dataset
+
+    # Affiche les logs directement dans le terminal en temps réel
+    stdin_open: true
+    tty: true

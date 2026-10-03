@@ -2,6 +2,7 @@
 Interface SDR et implémentations (USB et RTL-TCP).
 """
 
+import time
 import socket
 import struct
 import numpy as np
@@ -82,6 +83,27 @@ class RtlTcpClient(SdrInterface):
         print(f"  [rtl_tcp] Connecté — tuner type={tuner_type}, "
               f"gain steps={gain_count}")
 
+    def _flush_socket_buffer(self):
+        """
+        Vide activement le buffer de réception du socket TCP.
+        Passe temporairement le socket en mode non-bloquant pour consommer
+        tous les échantillons obsolètes déjà poussés par le serveur rtl_tcp.
+        """
+        if self._sock is None:
+            return
+
+        self._sock.setblocking(False)
+        try:
+            while True:
+                data = self._sock.recv(4096)
+                if not data:
+                    break
+        except (BlockingIOError, OSError):
+            pass  # Buffer vidé avec succès
+        finally:
+            self._sock.setblocking(True)
+            self._sock.settimeout(self._timeout)
+
     def _send_cmd(self, cmd: int, param: int):
         param_u32 = param & 0xFFFFFFFF
         pkt = struct.pack(">BI", cmd, param_u32)
@@ -110,6 +132,15 @@ class RtlTcpClient(SdrInterface):
     def center_freq(self, freq_hz: float):
         self._center_freq = int(freq_hz)
         self._send_cmd(self.CMD_SET_FREQ, self._center_freq)
+        
+        # 1. Purge immédiate du buffer accumulé avant/pendant l'envoi de la commande
+        self._flush_socket_buffer()
+        
+        # 2. Pause pour laisser le tuner/PLL physique se stabiliser
+        time.sleep(0.01)
+        
+        # 3. Seconde purge des échantillons de transition arrivés pendant le rétablissement
+        self._flush_socket_buffer()
 
     @property
     def sample_rate(self) -> float:
@@ -119,6 +150,11 @@ class RtlTcpClient(SdrInterface):
     def sample_rate(self, rate_hz: float):
         self._sample_rate = int(rate_hz)
         self._send_cmd(self.CMD_SET_SAMPLE_RATE, self._sample_rate)
+        
+        # Purge du buffer réseau pour éliminer les échantillons à l'ancien SR
+        self._flush_socket_buffer()
+        time.sleep(0.01)
+        self._flush_socket_buffer()
 
     @property
     def gain(self) -> float:
@@ -132,12 +168,15 @@ class RtlTcpClient(SdrInterface):
         else:
             self._send_cmd(self.CMD_SET_GAIN_MODE, 1)
             self._send_cmd(self.CMD_SET_GAIN, int(gain_db * 10))
+        self._flush_socket_buffer()
 
     def set_freq_correction(self, ppm: int):
         self._send_cmd(self.CMD_SET_FREQ_CORR, int(ppm))
+        self._flush_socket_buffer()
 
     def set_offset_tuning(self, enabled: bool):
         self._send_cmd(self.CMD_SET_OFFSET_TUNING, 1 if enabled else 0)
+        self._flush_socket_buffer()
 
     def read_samples(self, n_samples: int) -> np.ndarray:
         n = max(256, (int(n_samples) // 256) * 256)
@@ -243,3 +282,139 @@ class UsbSdrClient(SdrInterface):
             except Exception:
                 pass
             self._sdr = None
+
+
+# ─────────────────────────────────────────────
+#  CLIENT REJEU FICHIER (aucun matériel requis)
+# ─────────────────────────────────────────────
+
+class FileReplaySdrClient(SdrInterface):
+    """
+    Rejoue des hops préalablement enregistrés (scan lancé avec
+    --save-hop-iq, voir recording.save_hop_iq) à la place d'un vrai
+    RTL-SDR. Permet de faire tourner scanner.scan() exactement comme en
+    live (mêmes détection/extraction/tracés), mais en lisant les
+    échantillons IQ depuis des fichiers au lieu du matériel — pratique
+    pour itérer sur la pipeline sans ressortir le RTL-SDR à chaque fois.
+
+    Fonctionnement :
+      - Au chargement, indexe tous les hops enregistrés dans `replay_dir`
+        via recording.list_hop_recordings(), triés par fréquence.
+      - Quand scanner.py fait `sdr.center_freq = freq` pour un hop, on
+        cherche le hop enregistré dont la fréquence centrale est la plus
+        proche (optionnellement borné par `freq_tolerance_hz`) et on
+        charge son buffer IQ (mis en cache pour les rejeux suivants).
+      - read_samples() reproduit le pattern à deux appels de scan() :
+        le premier appel après un changement de fréquence correspond au
+        "settle skip" (de toute façon jeté par l'appelant) → on renvoie
+        des zéros sans toucher au buffer ; les appels suivants consomment
+        le buffer réel via un curseur interne, avec zero-padding si on
+        demande plus d'échantillons qu'il n'y en a d'enregistrés.
+    """
+
+    def __init__(self, replay_dir, freq_tolerance_hz=None):
+        from recording import list_hop_recordings, load_hop_iq
+        self._load_hop_iq = load_hop_iq
+
+        self._hops = list_hop_recordings(replay_dir)
+        if not self._hops:
+            raise FileNotFoundError(
+                f"Aucun hop rejouable trouvé dans '{replay_dir}'. "
+                f"Il faut d'abord lancer un scan (USB ou RTL-TCP) avec "
+                f"--save-hop-iq pour générer des fichiers hop_*.iq.wav."
+            )
+
+        self._replay_dir        = replay_dir
+        self._freq_tolerance_hz = freq_tolerance_hz
+        self._buffer            = None
+        self._cursor            = 0
+        self._settle_pending    = False
+        self._cache             = {}
+
+        freqs_mhz = ", ".join(f"{h['freq_hz']/1e6:.3f}" for h in self._hops)
+        print(f"  [Replay] {len(self._hops)} hop(s) indexé(s) dans "
+              f"'{replay_dir}' : {freqs_mhz} MHz")
+
+        super().__init__()
+
+    def _nearest_hop(self, freq_hz):
+        best = min(self._hops, key=lambda h: abs(h["freq_hz"] - freq_hz))
+        tol = self._freq_tolerance_hz
+        if tol is not None and abs(best["freq_hz"] - freq_hz) > tol:
+            return None
+        return best
+
+    @property
+    def center_freq(self) -> float:
+        return self._center_freq
+
+    @center_freq.setter
+    def center_freq(self, freq_hz: float):
+        self._center_freq = int(freq_hz)
+        hop = self._nearest_hop(self._center_freq)
+
+        if hop is None:
+            print(f"  [Replay] ⚠  Aucun hop enregistré proche de "
+                  f"{self._center_freq/1e6:.3f} MHz (tolérance dépassée) "
+                  f"→ hop vide (zéros).")
+            self._buffer = np.zeros(0, dtype=np.complex64)
+        else:
+            key = hop["wav_path"]
+            if key not in self._cache:
+                iq, sr = self._load_hop_iq(key)
+                self._cache[key] = iq
+                if sr != self._sample_rate:
+                    print(f"  [Replay] ⚠  Sample rate enregistré ({sr/1e6:.3f} MHz) "
+                          f"≠ sample rate demandé ({self._sample_rate/1e6:.3f} MHz) "
+                          f"pour {key} — rejoué tel quel (pas de rééchantillonnage).")
+            self._buffer = self._cache[key]
+
+        self._cursor         = 0
+        self._settle_pending = True
+
+    @property
+    def sample_rate(self) -> float:
+        return self._sample_rate
+
+    @sample_rate.setter
+    def sample_rate(self, rate_hz: float):
+        self._sample_rate = int(rate_hz)
+
+    @property
+    def gain(self) -> float:
+        return self._gain
+
+    @gain.setter
+    def gain(self, gain_db: float):
+        self._gain = gain_db  # no-op matériel : conservé pour compat d'API
+
+    def set_freq_correction(self, ppm):
+        pass  # sans objet en rejeu fichier
+
+    def set_offset_tuning(self, enabled):
+        pass  # sans objet en rejeu fichier
+
+    def read_samples(self, n_samples: int) -> np.ndarray:
+        n = max(256, (int(n_samples) // 256) * 256)
+
+        # Le premier read après un retune == le "settle skip" de scan(),
+        # de toute façon jeté par l'appelant : on ne consomme pas le buffer.
+        if self._settle_pending:
+            self._settle_pending = False
+            return np.zeros(n, dtype=np.complex64)
+
+        buf = self._buffer if self._buffer is not None else np.zeros(0, dtype=np.complex64)
+        end = self._cursor + n
+        chunk = buf[self._cursor:end]
+
+        if len(chunk) < n:
+            if len(buf) > 0:
+                print(f"  [Replay] ⚠  Hop épuisé ({len(buf)} échantillons "
+                      f"enregistrés < {n} demandés) — complété par des zéros.")
+            chunk = np.concatenate([chunk, np.zeros(n - len(chunk), dtype=np.complex64)])
+
+        self._cursor = end
+        return chunk
+
+    def close(self):
+        self._cache.clear()
